@@ -182,7 +182,7 @@ describe('processAction', () => {
   it('FOLD with only 2 players ends the hand', async () => {
     await startHand2(gm)
     const res = gm.processAction(TABLE, P1, 'FOLD')
-    expect(res).toMatchObject({ ok: true, handEnded: true, reason: 'all_folded' })
+    expect(res).toMatchObject({ ok: true, handEnded: true, data: { reason: 'all_folded' } })
     expect(gm.getPublicHandState(TABLE)).toBeNull()
   })
 
@@ -308,10 +308,27 @@ describe('processAction', () => {
     // After P1 all-in (large raise), P2 must call or fold.
     // P2 calls all-in → both all-in → runout to showdown.
     const res = gm.processAction(TABLE, P2, 'ALL_IN')
-    // Either streets_complete (board ran out) or hand still going.
-    // With both all-in, board should run out.
-    expect(res).toMatchObject({ ok: true, handEnded: true, reason: 'streets_complete' })
+    // With both all-in, board should run out automatically.
+    expect(res).toMatchObject({ ok: true, handEnded: true, data: { reason: 'showdown' } })
     expect(gm.getPublicHandState(TABLE)).toBeNull()
+  })
+
+  it('HandEndedData includes players, hole cards, pot, and community cards', async () => {
+    await startHand2(gm)
+    gm.processAction(TABLE, P1, 'ALL_IN')
+    const res = gm.processAction(TABLE, P2, 'ALL_IN')
+    if (!('handEnded' in res) || !res.handEnded) throw new Error('Expected hand to end')
+    const { data } = res
+    expect(data.players).toHaveLength(2)
+    expect(data.pot).toBeGreaterThan(0)
+    expect(data.communityCards).toHaveLength(5)
+    for (const p of data.players) {
+      expect(p.holeCards).toHaveLength(2)
+      expect(p.totalContributed).toBeGreaterThan(0)
+    }
+    // Chip conservation: sum(finalStacks) == sum(initialStacks)
+    const sumInitial = data.players.reduce((s, p) => s + p.stackAtEnd + p.totalContributed, 0)
+    expect(sumInitial).toBe(2000) // 2 players × 1000 default stack
   })
 
   it('no duplicate cards in hole cards + community cards (post-flop)', async () => {

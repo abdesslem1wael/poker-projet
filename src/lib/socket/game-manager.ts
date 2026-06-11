@@ -8,6 +8,7 @@ import type {
   PlayerStatus,
   HandState,
   TableGame,
+  HandEndedData,
 } from './game-types'
 import type {
   BettingAction,
@@ -20,7 +21,7 @@ type DB = any
 
 export type ActionResult =
   | { ok: true; handEnded?: false }
-  | { ok: true; handEnded: true; reason: 'all_folded' | 'streets_complete' }
+  | { ok: true; handEnded: true; data: HandEndedData }
   | { error: string }
 
 export class GameManager {
@@ -29,7 +30,7 @@ export class GameManager {
   private getOrCreate(tableId: string): TableGame {
     let g = this.games.get(tableId)
     if (!g) {
-      g = { tableId, dealerSeatNumber: 0, handState: null }
+      g = { tableId, dealerSeatNumber: 0, handCount: 0, handState: null }
       this.games.set(tableId, g)
     }
     return g
@@ -173,9 +174,13 @@ export class GameManager {
     }
     if (players[actorIdx].status !== 'active') actorIdx = -1
 
+    game.handCount += 1
+
     const handState: HandState = {
       phase: 'PRE_FLOP',
       bigBlind,
+      handNumber: game.handCount,
+      startedAt: new Date(),
       deckRemaining: deckCopy,
       communityCards: [],
       players,
@@ -296,22 +301,46 @@ export class GameManager {
     // Hand over if only one non-folded player remains.
     const standing = state.players.filter(p => p.status !== 'folded')
     if (standing.length === 1) {
+      const data = this.buildHandEndedData(state, game.handCount, 'all_folded')
       game.handState = null
-      return { ok: true, handEnded: true, reason: 'all_folded' }
+      return { ok: true, handEnded: true, data }
     }
 
     if (this.isBettingRoundComplete(state)) {
       const cont = this.advanceToNextRound(state)
       if (!cont) {
-        // All streets done — caller handles showdown (Phase 11).
+        const data = this.buildHandEndedData(state, game.handCount, 'showdown')
         game.handState = null
-        return { ok: true, handEnded: true, reason: 'streets_complete' }
+        return { ok: true, handEnded: true, data }
       }
     } else {
       this.advanceTurnIndex(state)
     }
 
     return { ok: true }
+  }
+
+  private buildHandEndedData(
+    state: HandState,
+    handNumber: number,
+    reason: 'all_folded' | 'showdown',
+  ): HandEndedData {
+    return {
+      reason,
+      handNumber,
+      startedAt: state.startedAt,
+      communityCards: [...state.communityCards],
+      pot: state.pot,
+      players: state.players.map(p => ({
+        playerId: p.playerId,
+        username: p.username,
+        seatNumber: p.seatNumber,
+        stackAtEnd: p.stack,
+        totalContributed: p.totalContributed,
+        hasFolded: p.status === 'folded',
+        holeCards: [p.holeCards[0], p.holeCards[1]],
+      })),
+    }
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────

@@ -76,6 +76,34 @@ export type TableStatePayload = {
   handState: PublicHandState | null  // null when no hand is running
 }
 
+// ── Showdown result (broadcast when a hand ends) ───────────────────────────
+
+export type ShowdownPotResult = {
+  amount: number
+  winners: string[]         // playerIds
+  winnerHandRank: number    // HandRank enum value (0 = no evaluation, e.g. all_folded)
+  winnerHandName: string
+}
+
+export type ShowdownPlayerResult = {
+  playerId: string
+  username: string
+  seatNumber: number
+  finalStack: number        // stack after pot distribution
+  chipDelta: number         // chips received from all pots (≥ 0)
+  netChipChange: number     // chipDelta − totalContributed (positive = profit, negative = loss)
+  hasFolded: boolean
+  holeCards: [Card, Card] | null  // null when all_folded (no showdown reveal)
+}
+
+export type ShowdownPayload = {
+  tableId: string
+  reason: 'all_folded' | 'showdown'
+  pots: ShowdownPotResult[]
+  players: ShowdownPlayerResult[]
+  communityCards: Card[]
+}
+
 // ── Server → Client ────────────────────────────────────────────────────────
 export interface ServerToClientEvents {
   socket_ready: (payload: { userId: string; username: string }) => void
@@ -95,10 +123,7 @@ export interface ServerToClientEvents {
     action: BettingAction
     amount: number
   }) => void
-  hand_ended: (payload: {
-    tableId: string
-    reason: 'all_folded' | 'streets_complete'
-  }) => void
+  showdown_result: (payload: ShowdownPayload) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────

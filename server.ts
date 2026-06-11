@@ -13,11 +13,14 @@ import {
   leaveTable,
 } from './src/lib/socket/table-session'
 import { GameManager } from './src/lib/socket/game-manager'
+import { computeShowdown } from './src/lib/socket/showdown-helper'
+import type { HandEndedData } from './src/lib/socket/game-types'
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
   SocketData,
   TableStatePayload,
+  ShowdownPayload,
 } from './src/lib/socket/types'
 
 const port = parseInt(process.env.PORT ?? '3000', 10)
@@ -37,6 +40,66 @@ async function buildTableState(supabase: any, tableId: string): Promise<TableSta
   const base = await getTableState(supabase, tableId)
   if (!base) return null
   return { ...base, handState: gm.getPublicHandState(tableId) }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function persistHandResult(supabase: any, data: HandEndedData, showdown: ShowdownPayload): Promise<void> {
+  // 1. Update each player's wallet to their final stack.
+  //    We use individual updates rather than a batch RPC because the service-role
+  //    client bypasses RLS and each call is fast; a transaction-level RPC would
+  //    require a new migration.
+  for (const p of showdown.players) {
+    const { error } = await supabase
+      .from('wallets')
+      .update({ chips: p.finalStack, updated_at: new Date().toISOString() })
+      .eq('user_id', p.playerId)
+    if (error) console.error(`[persist] wallet update failed  user=${p.playerId}`, error)
+  }
+
+  // 2. Insert win/loss transactions.
+  //    The transactions table requires amount > 0, so skip net-zero outcomes.
+  for (const p of showdown.players) {
+    const contribution = data.players.find(hp => hp.playerId === p.playerId)!.totalContributed
+    const netGain = p.chipDelta - contribution
+    if (netGain === 0) continue  // no transaction for break-even (e.g. returned partial blind)
+
+    const { error } = await supabase.from('transactions').insert({
+      user_id: p.playerId,
+      amount: Math.abs(netGain),
+      type: netGain > 0 ? 'win' : 'loss',
+      note: `Hand #${data.handNumber}`,
+    })
+    if (error) console.error(`[persist] transaction insert failed  user=${p.playerId}`, error)
+  }
+
+  // 3. Save hand history.
+  const chipDeltasJson: Record<string, number> = {}
+  for (const p of showdown.players) {
+    const contribution = data.players.find(hp => hp.playerId === p.playerId)!.totalContributed
+    chipDeltasJson[p.playerId] = p.chipDelta - contribution  // net gain/loss
+  }
+
+  const { error: histErr } = await supabase.from('game_history').insert({
+    table_id: showdown.tableId,
+    hand_number: data.handNumber,
+    started_at: data.startedAt.toISOString(),
+    ended_at: new Date().toISOString(),
+    result_json: {
+      reason: showdown.reason,
+      pots: showdown.pots,
+      players: showdown.players.map(p => ({
+        playerId: p.playerId,
+        username: p.username,
+        finalStack: p.finalStack,
+        chipDelta: p.chipDelta,
+        hasFolded: p.hasFolded,
+        // Hole cards omitted from history JSON — they are derivable from game_history
+        // result_json only if we choose to add them later. For now we keep it clean.
+      })),
+    },
+    chip_deltas_json: chipDeltasJson,
+  })
+  if (histErr) console.error('[persist] game_history insert failed', histErr)
 }
 
 nextApp.prepare().then(() => {
@@ -260,8 +323,18 @@ nextApp.prepare().then(() => {
       })
 
       if (result.handEnded) {
-        console.log(`[game] hand ended  table=${tableId} reason=${result.reason}`)
-        io.to(`table:${tableId}`).emit('hand_ended', { tableId, reason: result.reason })
+        const showdown = computeShowdown(tableId, result.data)
+        console.log(
+          `[game] hand ended  table=${tableId} reason=${result.data.reason} hand=${result.data.handNumber}`,
+        )
+
+        try {
+          await persistHandResult(supabase, result.data, showdown)
+        } catch (err) {
+          console.error('[game] Failed to persist hand result:', err)
+        }
+
+        io.to(`table:${tableId}`).emit('showdown_result', showdown)
       }
 
       const state = await buildTableState(supabase, tableId)

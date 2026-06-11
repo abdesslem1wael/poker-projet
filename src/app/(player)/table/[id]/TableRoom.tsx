@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import type { TableStatePayload, Card, BettingAction } from '@/lib/socket/types'
+import type { TableStatePayload, Card, BettingAction, ShowdownPayload } from '@/lib/socket/types'
 import { getSocket } from '@/lib/socket/client'
 import type { AppSocket } from '@/lib/socket/client'
 
@@ -58,6 +58,7 @@ export default function TableRoom({
   const [connected, setConnected] = useState(false)
   const [myHoleCards, setMyHoleCards] = useState<[Card, Card] | null>(null)
   const [raiseAmount, setRaiseAmount] = useState(0)
+  const [showdownResult, setShowdownResult] = useState<ShowdownPayload | null>(null)
 
   const hand = state.handState
   const isMyTurn = hand?.currentTurnPlayerId === currentUserId
@@ -100,7 +101,13 @@ export default function TableRoom({
       const onDisconnect = () => { if (active) setConnected(false) }
 
       const onTableState = (payload: TableStatePayload) => {
-        if (active && payload.tableId === initialState.tableId) setState(payload)
+        if (!active || payload.tableId !== initialState.tableId) return
+        setState(payload)
+        // A new hand starting clears the previous showdown display and hole cards.
+        if (payload.handState) {
+          setShowdownResult(null)
+          setMyHoleCards(null)
+        }
       }
 
       const onDealCards = (payload: { tableId: string; holeCards: [Card, Card] }) => {
@@ -109,16 +116,24 @@ export default function TableRoom({
         }
       }
 
+      const onShowdownResult = (payload: ShowdownPayload) => {
+        if (active && payload.tableId === initialState.tableId) {
+          setShowdownResult(payload)
+        }
+      }
+
       socket.on('connect', onConnect)
       socket.on('disconnect', onDisconnect)
       socket.on('table_state', onTableState)
       socket.on('deal_cards', onDealCards)
+      socket.on('showdown_result', onShowdownResult)
 
       cleanup = () => {
         socket.off('connect', onConnect)
         socket.off('disconnect', onDisconnect)
         socket.off('table_state', onTableState)
         socket.off('deal_cards', onDealCards)
+        socket.off('showdown_result', onShowdownResult)
       }
     })
 
@@ -260,6 +275,101 @@ export default function TableRoom({
           <div className="flex gap-2">
             <CardFace card={myHoleCards[0]} />
             <CardFace card={myHoleCards[1]} />
+          </div>
+        </section>
+      )}
+
+      {/* ── Showdown result ── */}
+      {!hand && showdownResult && (
+        <section className="space-y-4 rounded-lg border border-green-300 bg-green-50 p-4 dark:border-green-800 dark:bg-green-950/20">
+          <h2 className="text-base font-semibold text-green-900 dark:text-green-300">
+            {showdownResult.reason === 'all_folded' ? 'Hand Complete — All Folded' : 'Showdown'}
+          </h2>
+
+          {/* Community cards at showdown */}
+          {showdownResult.communityCards.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-zinc-500">Board</p>
+              <div className="flex gap-2">
+                {showdownResult.communityCards.map((c, i) => (
+                  <CardFace key={i} card={c} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Pot breakdown */}
+          <div className="space-y-1">
+            {showdownResult.pots.map((pot, i) => {
+              const winnerNames = showdownResult.players
+                .filter(p => pot.winners.includes(p.playerId))
+                .map(p => p.username)
+              return (
+                <div key={i} className="text-sm text-green-800 dark:text-green-300">
+                  <span className="font-semibold">
+                    {winnerNames.join(' & ')}
+                  </span>
+                  {' wins '}
+                  <span className="font-semibold tabular-nums">{pot.amount}</span>
+                  {pot.winnerHandName !== 'Last Standing' && (
+                    <span className="ml-1 text-xs text-green-600 dark:text-green-400">
+                      ({pot.winnerHandName})
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Player results with revealed cards */}
+          {showdownResult.players.some(p => p.holeCards) && (
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-zinc-500">Hands</p>
+              <div className="flex flex-wrap gap-4">
+                {showdownResult.players
+                  .filter(p => p.holeCards)
+                  .map(p => (
+                    <div key={p.playerId} className="space-y-1">
+                      <p className="text-xs font-medium text-zinc-600 dark:text-zinc-400">
+                        {p.username}
+                        {p.playerId === currentUserId && (
+                          <span className="ml-1 text-zinc-400">(you)</span>
+                        )}
+                      </p>
+                      <div className="flex gap-1">
+                        <CardFace card={p.holeCards![0]} />
+                        <CardFace card={p.holeCards![1]} />
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {/* Chip changes */}
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-zinc-500">Chip changes</p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {showdownResult.players.map(p => (
+                <span key={p.playerId} className="text-xs tabular-nums text-zinc-600 dark:text-zinc-400">
+                  {p.username}:{' '}
+                  <span className={[
+                    'font-medium',
+                    p.netChipChange > 0
+                      ? 'text-green-700 dark:text-green-400'
+                      : p.netChipChange < 0
+                      ? 'text-red-600 dark:text-red-400'
+                      : 'text-zinc-500',
+                  ].join(' ')}>
+                    {p.netChipChange > 0 ? '+' : ''}{p.netChipChange.toLocaleString()}
+                  </span>
+                  {' '}
+                  <span className="text-zinc-400">
+                    ({p.finalStack.toLocaleString()})
+                  </span>
+                </span>
+              ))}
+            </div>
           </div>
         </section>
       )}
@@ -441,8 +551,8 @@ export default function TableRoom({
         </div>
       )}
 
-      {/* ── Waiting notice (no hand, not enough players) ── */}
-      {!hand && !canStartHand && (
+      {/* ── Waiting notice (no hand, not enough players, no showdown to display) ── */}
+      {!hand && !canStartHand && !showdownResult && (
         <div className="rounded-lg border border-dashed border-zinc-200 p-6 text-center text-sm text-zinc-400 dark:border-zinc-800">
           {state.seats.filter(s => s.playerId !== null).length < 2
             ? 'Waiting for more players to join…'
