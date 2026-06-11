@@ -1,7 +1,11 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 
-export default async function Home() {
+export default async function AdminLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
   const supabase = await createClient()
 
   const {
@@ -18,9 +22,9 @@ export default async function Home() {
     .eq('id', user.id)
     .single()
 
-  if (profile?.role === 'admin') {
-    redirect('/admin/dashboard')
+  if (profile?.role !== 'admin') {
+    redirect('/lobby')
   }
 
-  redirect('/lobby')
+  return <>{children}</>
 }
