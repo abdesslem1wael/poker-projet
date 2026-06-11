@@ -171,6 +171,7 @@ nextApp.prepare().then(() => {
             console.error('[game] Failed to persist hand result:', err)
           }
           io.to(`table:${tableId}`).emit('showdown_result', showdown)
+          scheduleAutoStart(tableId)
         } else {
           const next = gm.getPublicHandState(tableId)
           if (next?.currentTurnPlayerId) {
@@ -184,6 +185,97 @@ nextApp.prepare().then(() => {
     }, TURN_TIMEOUT_MS)
 
     turnTimers.set(tableId, t)
+  }
+
+  // ── Auto-start next hand ───────────────────────────────────────────────────
+  const AUTO_START_DELAY_MS = 5_000
+  const autoStartTimers = new Map<string, NodeJS.Timeout>()
+
+  // Core hand-start logic shared by manual start_hand and auto-start.
+  // Returns null on success, or an error string on failure.
+  async function doStartHand(tableId: string): Promise<null | 'too_few' | 'failed'> {
+    if (gm.hasActiveHand(tableId)) return 'failed'
+
+    const { data: tableData } = await supabase
+      .from('poker_tables')
+      .select('small_blind, big_blind, status')
+      .eq('id', tableId)
+      .single()
+
+    if (!tableData || (tableData as { status: string }).status === 'closed') return 'failed'
+
+    const { small_blind, big_blind } = tableData as { small_blind: number; big_blind: number }
+
+    const { data: playersData } = await supabase
+      .from('table_players')
+      .select('player_id, seat_number')
+      .eq('table_id', tableId)
+      .eq('status', 'seated')
+
+    const rows = (playersData as Array<{ player_id: string; seat_number: number }> | null) ?? []
+    if (rows.length < 2) return 'too_few'
+
+    const { data: profilesData } = await supabase
+      .from('profiles')
+      .select('id, username')
+      .in('id', rows.map(r => r.player_id))
+
+    const usernameMap = new Map<string, string>(
+      ((profilesData as Array<{ id: string; username: string }> | null) ?? []).map(
+        p => [p.id, p.username],
+      ),
+    )
+
+    const seatedPlayers = rows.map(r => ({
+      playerId: r.player_id,
+      seatNumber: r.seat_number,
+      username: usernameMap.get(r.player_id) ?? 'Unknown',
+    }))
+
+    const result = await gm.startHand(tableId, seatedPlayers, supabase, small_blind, big_blind)
+    if ('error' in result) return 'failed'
+
+    console.log(`[game] hand started  table=${tableId}`)
+
+    // Send each seated socket its private hole cards.
+    const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
+    for (const s of roomSockets) {
+      const cards = gm.getPlayerHoleCards(tableId, s.data.userId)
+      if (cards) s.emit('deal_cards', { tableId, holeCards: cards })
+    }
+
+    // Start the turn timer for the first actor.
+    const firstState = gm.getPublicHandState(tableId)
+    if (firstState?.currentTurnPlayerId) {
+      startTurnTimer(tableId, firstState.currentTurnPlayerId)
+    }
+
+    const state = await buildTableState(supabase, tableId)
+    if (state) io.to(`table:${tableId}`).emit('table_state', state)
+
+    return null
+  }
+
+  function scheduleAutoStart(tableId: string): void {
+    // Cancel any existing pending auto-start for this table.
+    const existing = autoStartTimers.get(tableId)
+    if (existing !== undefined) { clearTimeout(existing); autoStartTimers.delete(tableId) }
+
+    // Tell clients to show the countdown.
+    io.to(`table:${tableId}`).emit('next_hand_countdown', {
+      tableId,
+      seconds: AUTO_START_DELAY_MS / 1000,
+    })
+
+    const t = setTimeout(() => {
+      autoStartTimers.delete(tableId)
+      void doStartHand(tableId).then(err => {
+        if (err === 'too_few') {
+          console.log(`[game] auto-start skipped — not enough players  table=${tableId}`)
+        }
+      })
+    }, AUTO_START_DELAY_MS)
+    autoStartTimers.set(tableId, t)
   }
 
   // ── Auth middleware ────────────────────────────────────────────────────────
@@ -305,76 +397,13 @@ nextApp.prepare().then(() => {
         return
       }
 
-      const { data: tableData } = await supabase
-        .from('poker_tables')
-        .select('small_blind, big_blind, status')
-        .eq('id', tableId)
-        .single()
-
-      if (!tableData || (tableData as { status: string }).status === 'closed') {
-        socket.emit('socket_error', { message: 'Table not found or is closed' })
-        return
-      }
-
-      const { small_blind, big_blind } = tableData as {
-        small_blind: number
-        big_blind: number
-      }
-
-      const { data: playersData } = await supabase
-        .from('table_players')
-        .select('player_id, seat_number')
-        .eq('table_id', tableId)
-        .eq('status', 'seated')
-
-      const rows = (playersData as Array<{ player_id: string; seat_number: number }> | null) ?? []
-
-      if (rows.length < 2) {
+      const err = await doStartHand(tableId)
+      if (err === 'too_few') {
         socket.emit('socket_error', { message: 'Need at least 2 seated players to start' })
-        return
+      } else if (err === 'failed') {
+        socket.emit('socket_error', { message: 'Unable to start hand' })
       }
-
-      const { data: profilesData } = await supabase
-        .from('profiles')
-        .select('id, username')
-        .in('id', rows.map(r => r.player_id))
-
-      const usernameMap = new Map<string, string>(
-        ((profilesData as Array<{ id: string; username: string }> | null) ?? []).map(
-          p => [p.id, p.username],
-        ),
-      )
-
-      const seatedPlayers = rows.map(r => ({
-        playerId: r.player_id,
-        seatNumber: r.seat_number,
-        username: usernameMap.get(r.player_id) ?? 'Unknown',
-      }))
-
-      const result = await gm.startHand(tableId, seatedPlayers, supabase, small_blind, big_blind)
-
-      if ('error' in result) {
-        socket.emit('socket_error', { message: result.error })
-        return
-      }
-
-      console.log(`[game] hand started  table=${tableId}`)
-
-      // Send each seated socket its private hole cards.
-      const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
-      for (const s of roomSockets) {
-        const cards = gm.getPlayerHoleCards(tableId, s.data.userId)
-        if (cards) s.emit('deal_cards', { tableId, holeCards: cards })
-      }
-
-      // Start the turn timer for the first actor.
-      const firstState = gm.getPublicHandState(tableId)
-      if (firstState?.currentTurnPlayerId) {
-        startTurnTimer(tableId, firstState.currentTurnPlayerId)
-      }
-
-      const state = await buildTableState(supabase, tableId)
-      if (state) io.to(`table:${tableId}`).emit('table_state', state)
+      // On success doStartHand already broadcast deal_cards + table_state.
     })
 
     // ── player_action ──────────────────────────────────────────────────────
@@ -422,6 +451,7 @@ nextApp.prepare().then(() => {
           console.error('[game] Failed to persist hand result:', err)
         }
         io.to(`table:${tableId}`).emit('showdown_result', showdown)
+        scheduleAutoStart(tableId)
       } else {
         // Start timer for the next actor.
         const next = gm.getPublicHandState(tableId)

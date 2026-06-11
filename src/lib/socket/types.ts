@@ -131,6 +131,11 @@ export interface ServerToClientEvents {
     playerId: string   // whose turn it is
     seconds: number    // time remaining (may be < full timeout on reconnect)
   }) => void
+  // Emitted after a hand ends; clients show a countdown then the next hand auto-starts.
+  next_hand_countdown: (payload: {
+    tableId: string
+    seconds: number
+  }) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────
