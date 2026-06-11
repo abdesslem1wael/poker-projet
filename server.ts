@@ -146,41 +146,45 @@ nextApp.prepare().then(() => {
       turnTimerStartedAt.delete(tableId)
 
       void (async () => {
-        // Try CHECK first (costs nothing), fall back to FOLD.
-        let result = gm.processAction(tableId, playerId, 'CHECK')
-        let autoAction: BettingAction = 'CHECK'
+        try {
+          // Try CHECK first (costs nothing), fall back to FOLD.
+          let result = gm.processAction(tableId, playerId, 'CHECK')
+          let autoAction: BettingAction = 'CHECK'
 
-        if ('error' in result) {
-          result = gm.processAction(tableId, playerId, 'FOLD')
-          autoAction = 'FOLD'
-          if ('error' in result) return  // hand already ended or player state changed
-        }
-
-        console.log(`[game] timeout auto-${autoAction}  table=${tableId} user=${playerId}`)
-
-        io.to(`table:${tableId}`).emit('action_result', {
-          tableId, playerId, action: autoAction, amount: 0,
-        })
-
-        if (result.handEnded) {
-          const showdown = computeShowdown(tableId, result.data)
-          console.log(
-            `[game] hand ended (timeout)  table=${tableId} reason=${result.data.reason}`,
-          )
-          try { await persistHandResult(supabase, result.data, showdown) } catch (err) {
-            console.error('[game] Failed to persist hand result:', err)
+          if ('error' in result) {
+            result = gm.processAction(tableId, playerId, 'FOLD')
+            autoAction = 'FOLD'
+            if ('error' in result) return  // hand already ended or player state changed
           }
-          io.to(`table:${tableId}`).emit('showdown_result', showdown)
-          scheduleAutoStart(tableId)
-        } else {
-          const next = gm.getPublicHandState(tableId)
-          if (next?.currentTurnPlayerId) {
-            startTurnTimer(tableId, next.currentTurnPlayerId)
-          }
-        }
 
-        const state = await buildTableState(supabase, tableId)
-        if (state) io.to(`table:${tableId}`).emit('table_state', state)
+          console.log(`[game] timeout auto-${autoAction}  table=${tableId} user=${playerId}`)
+
+          io.to(`table:${tableId}`).emit('action_result', {
+            tableId, playerId, action: autoAction, amount: 0,
+          })
+
+          if (result.handEnded) {
+            const showdown = computeShowdown(tableId, result.data)
+            console.log(
+              `[game] hand ended (timeout)  table=${tableId} reason=${result.data.reason}`,
+            )
+            try { await persistHandResult(supabase, result.data, showdown) } catch (err) {
+              console.error('[game] Failed to persist hand result:', err)
+            }
+            io.to(`table:${tableId}`).emit('showdown_result', showdown)
+            scheduleAutoStart(tableId)
+          } else {
+            const next = gm.getPublicHandState(tableId)
+            if (next?.currentTurnPlayerId) {
+              startTurnTimer(tableId, next.currentTurnPlayerId)
+            }
+          }
+
+          const state = await buildTableState(supabase, tableId)
+          if (state) io.to(`table:${tableId}`).emit('table_state', state)
+        } catch (err) {
+          console.error('[game] turn timer action crashed:', err)
+        }
       })()
     }, TURN_TIMEOUT_MS)
 
@@ -269,11 +273,13 @@ nextApp.prepare().then(() => {
 
     const t = setTimeout(() => {
       autoStartTimers.delete(tableId)
-      void doStartHand(tableId).then(err => {
-        if (err === 'too_few') {
-          console.log(`[game] auto-start skipped — not enough players  table=${tableId}`)
-        }
-      })
+      void doStartHand(tableId)
+        .then(err => {
+          if (err === 'too_few') {
+            console.log(`[game] auto-start skipped — not enough players  table=${tableId}`)
+          }
+        })
+        .catch(err => console.error('[game] auto-start crashed:', err))
     }, AUTO_START_DELAY_MS)
     autoStartTimers.set(tableId, t)
   }
