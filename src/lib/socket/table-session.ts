@@ -92,6 +92,7 @@ export async function getTableState(
     status: table.status as TableStatePayload['status'],
     seats,
     spectators,
+    handState: null,  // populated by GameManager in the socket server
   }
 }
 

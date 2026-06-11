@@ -1,11 +1,55 @@
 // Socket.io event protocol — shared between server.ts and browser client.
 // No engine internals, no hidden card data, no DB row types.
 
+// ── Card types ─────────────────────────────────────────────────────────────
+// Inlined here (matches poker/types.ts structurally) so the client bundle does
+// not pull in any server-side poker modules.
+export type CardSuit = 'clubs' | 'diamonds' | 'hearts' | 'spades'
+export type CardRank = '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'A'
+export type Card = { suit: CardSuit; rank: CardRank }
+
+// ── Betting ────────────────────────────────────────────────────────────────
+export type BettingAction = 'FOLD' | 'CHECK' | 'CALL' | 'RAISE' | 'ALL_IN'
+
+// ── Per-player public hand state ───────────────────────────────────────────
+export type PlayerPhase = 'active' | 'folded' | 'all-in'
+
+export type PublicPlayerHandState = {
+  playerId: string
+  seatNumber: number
+  stack: number
+  roundContribution: number   // chips put in during the current betting round
+  totalContributed: number    // chips put in across all rounds this hand
+  playerPhase: PlayerPhase
+  hasActedThisRound: boolean
+  // Hole cards are never included here — they arrive via the private deal_cards event.
+}
+
+// ── Public hand state ──────────────────────────────────────────────────────
+export type PublicHandState = {
+  phase: 'PRE_FLOP' | 'FLOP' | 'TURN' | 'RIVER'
+  pot: number
+  currentBet: number
+  minRaise: number
+  currentTurnPlayerId: string | null
+  dealerSeatNumber: number
+  smallBlindSeatNumber: number
+  bigBlindSeatNumber: number
+  communityCards: Card[]
+  players: PublicPlayerHandState[]
+}
+
 // ── Client → Server ────────────────────────────────────────────────────────
 export interface ClientToServerEvents {
   join_table: (payload: { tableId: string }) => void
   spectate_table: (payload: { tableId: string }) => void
   leave_table: (payload: { tableId: string }) => void
+  start_hand: (payload: { tableId: string }) => void
+  player_action: (payload: {
+    tableId: string
+    action: BettingAction
+    amount?: number  // for RAISE: the new total bet level; omitted for other actions
+  }) => void
 }
 
 // ── Public payload types ───────────────────────────────────────────────────
@@ -29,6 +73,7 @@ export type TableStatePayload = {
   status: 'waiting' | 'active' | 'closed'
   seats: SeatInfo[]       // length === maxPlayers; null playerId means empty seat
   spectators: SpectatorInfo[]
+  handState: PublicHandState | null  // null when no hand is running
 }
 
 // ── Server → Client ────────────────────────────────────────────────────────
@@ -39,6 +84,21 @@ export interface ServerToClientEvents {
   table_left: (payload: { tableId: string }) => void
   spectator_joined: (payload: { tableId: string }) => void
   socket_error: (payload: { message: string }) => void
+  // ── Hand events ──────────────────────────────────────────────────────────
+  deal_cards: (payload: {
+    tableId: string
+    holeCards: [Card, Card]   // sent only to the player whose cards these are
+  }) => void
+  action_result: (payload: {
+    tableId: string
+    playerId: string
+    action: BettingAction
+    amount: number
+  }) => void
+  hand_ended: (payload: {
+    tableId: string
+    reason: 'all_folded' | 'streets_complete'
+  }) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────
