@@ -124,6 +124,13 @@ export interface ServerToClientEvents {
     amount: number
   }) => void
   showdown_result: (payload: ShowdownPayload) => void
+  // Emitted when the acting player changes. Client starts a countdown;
+  // server auto-acts (check or fold) when the timer expires.
+  turn_timer_start: (payload: {
+    tableId: string
+    playerId: string   // whose turn it is
+    seconds: number    // time remaining (may be < full timeout on reconnect)
+  }) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────
@@ -131,5 +138,6 @@ export interface SocketData {
   userId: string
   username: string
   role: string
-  joinedTables: Set<string>
+  joinedTables: Set<string>   // tables this socket has joined (seated OR spectating)
+  seatedAtTables: Set<string> // tables where this socket holds a seat (not spectating)
 }

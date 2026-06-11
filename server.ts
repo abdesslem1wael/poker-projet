@@ -16,6 +16,7 @@ import { GameManager } from './src/lib/socket/game-manager'
 import { computeShowdown } from './src/lib/socket/showdown-helper'
 import type { HandEndedData } from './src/lib/socket/game-types'
 import type {
+  BettingAction,
   ClientToServerEvents,
   ServerToClientEvents,
   SocketData,
@@ -33,7 +34,7 @@ const handle = nextApp.getRequestHandler()
 // Single game manager instance — lives for the lifetime of the process.
 const gm = new GameManager()
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Module-level helpers (take supabase as param so they can be called anywhere) ──
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function buildTableState(supabase: any, tableId: string): Promise<TableStatePayload | null> {
@@ -45,9 +46,6 @@ async function buildTableState(supabase: any, tableId: string): Promise<TableSta
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function persistHandResult(supabase: any, data: HandEndedData, showdown: ShowdownPayload): Promise<void> {
   // 1. Update each player's wallet to their final stack.
-  //    We use individual updates rather than a batch RPC because the service-role
-  //    client bypasses RLS and each call is fast; a transaction-level RPC would
-  //    require a new migration.
   for (const p of showdown.players) {
     const { error } = await supabase
       .from('wallets')
@@ -56,12 +54,11 @@ async function persistHandResult(supabase: any, data: HandEndedData, showdown: S
     if (error) console.error(`[persist] wallet update failed  user=${p.playerId}`, error)
   }
 
-  // 2. Insert win/loss transactions.
-  //    The transactions table requires amount > 0, so skip net-zero outcomes.
+  // 2. Insert win/loss transactions (amount > 0 constraint — skip break-even).
   for (const p of showdown.players) {
     const contribution = data.players.find(hp => hp.playerId === p.playerId)!.totalContributed
     const netGain = p.chipDelta - contribution
-    if (netGain === 0) continue  // no transaction for break-even (e.g. returned partial blind)
+    if (netGain === 0) continue
 
     const { error } = await supabase.from('transactions').insert({
       user_id: p.playerId,
@@ -76,7 +73,7 @@ async function persistHandResult(supabase: any, data: HandEndedData, showdown: S
   const chipDeltasJson: Record<string, number> = {}
   for (const p of showdown.players) {
     const contribution = data.players.find(hp => hp.playerId === p.playerId)!.totalContributed
-    chipDeltasJson[p.playerId] = p.chipDelta - contribution  // net gain/loss
+    chipDeltasJson[p.playerId] = p.chipDelta - contribution
   }
 
   const { error: histErr } = await supabase.from('game_history').insert({
@@ -93,8 +90,6 @@ async function persistHandResult(supabase: any, data: HandEndedData, showdown: S
         finalStack: p.finalStack,
         chipDelta: p.chipDelta,
         hasFolded: p.hasFolded,
-        // Hole cards omitted from history JSON — they are derivable from game_history
-        // result_json only if we choose to add them later. For now we keep it clean.
       })),
     },
     chip_deltas_json: chipDeltasJson,
@@ -125,6 +120,72 @@ nextApp.prepare().then(() => {
     cors: { origin: false },
   })
 
+  // ── Turn timer ─────────────────────────────────────────────────────────────
+  const TURN_TIMEOUT_MS = 30_000
+  const turnTimers = new Map<string, NodeJS.Timeout>()
+  const turnTimerStartedAt = new Map<string, number>()  // tableId → epoch ms
+
+  function clearTurnTimer(tableId: string): void {
+    const t = turnTimers.get(tableId)
+    if (t !== undefined) { clearTimeout(t); turnTimers.delete(tableId) }
+    turnTimerStartedAt.delete(tableId)
+  }
+
+  function startTurnTimer(tableId: string, playerId: string): void {
+    clearTurnTimer(tableId)
+
+    const startedAt = Date.now()
+    turnTimerStartedAt.set(tableId, startedAt)
+
+    io.to(`table:${tableId}`).emit('turn_timer_start', {
+      tableId, playerId, seconds: TURN_TIMEOUT_MS / 1000,
+    })
+
+    const t = setTimeout(() => {
+      turnTimers.delete(tableId)
+      turnTimerStartedAt.delete(tableId)
+
+      void (async () => {
+        // Try CHECK first (costs nothing), fall back to FOLD.
+        let result = gm.processAction(tableId, playerId, 'CHECK')
+        let autoAction: BettingAction = 'CHECK'
+
+        if ('error' in result) {
+          result = gm.processAction(tableId, playerId, 'FOLD')
+          autoAction = 'FOLD'
+          if ('error' in result) return  // hand already ended or player state changed
+        }
+
+        console.log(`[game] timeout auto-${autoAction}  table=${tableId} user=${playerId}`)
+
+        io.to(`table:${tableId}`).emit('action_result', {
+          tableId, playerId, action: autoAction, amount: 0,
+        })
+
+        if (result.handEnded) {
+          const showdown = computeShowdown(tableId, result.data)
+          console.log(
+            `[game] hand ended (timeout)  table=${tableId} reason=${result.data.reason}`,
+          )
+          try { await persistHandResult(supabase, result.data, showdown) } catch (err) {
+            console.error('[game] Failed to persist hand result:', err)
+          }
+          io.to(`table:${tableId}`).emit('showdown_result', showdown)
+        } else {
+          const next = gm.getPublicHandState(tableId)
+          if (next?.currentTurnPlayerId) {
+            startTurnTimer(tableId, next.currentTurnPlayerId)
+          }
+        }
+
+        const state = await buildTableState(supabase, tableId)
+        if (state) io.to(`table:${tableId}`).emit('table_state', state)
+      })()
+    }, TURN_TIMEOUT_MS)
+
+    turnTimers.set(tableId, t)
+  }
+
   // ── Auth middleware ────────────────────────────────────────────────────────
   io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token as string | undefined
@@ -149,6 +210,7 @@ nextApp.prepare().then(() => {
     socket.data.username = profile?.username ?? 'Unknown'
     socket.data.role = profile?.role ?? 'player'
     socket.data.joinedTables = new Set()
+    socket.data.seatedAtTables = new Set()
 
     next()
   })
@@ -171,6 +233,7 @@ nextApp.prepare().then(() => {
       }
 
       socket.data.joinedTables.add(tableId)
+      socket.data.seatedAtTables.add(tableId)
       socket.join(`table:${tableId}`)
 
       socket.emit('table_joined', { tableId, seatNumber: result.seatNumber })
@@ -178,9 +241,22 @@ nextApp.prepare().then(() => {
       const state = await buildTableState(supabase, tableId)
       if (state) io.to(`table:${tableId}`).emit('table_state', state)
 
-      // Send existing hole cards if a hand is in progress.
+      // Reconnect: resend private hole cards if a hand is in progress.
       const cards = gm.getPlayerHoleCards(tableId, userId)
       if (cards) socket.emit('deal_cards', { tableId, holeCards: cards })
+
+      // Reconnect: resend current turn timer state with accurate remaining seconds.
+      const timerStart = turnTimerStartedAt.get(tableId)
+      const handState = gm.getPublicHandState(tableId)
+      if (handState?.currentTurnPlayerId && timerStart !== undefined) {
+        const elapsed = Date.now() - timerStart
+        const remaining = Math.max(1, Math.ceil((TURN_TIMEOUT_MS - elapsed) / 1000))
+        socket.emit('turn_timer_start', {
+          tableId,
+          playerId: handState.currentTurnPlayerId,
+          seconds: remaining,
+        })
+      }
     })
 
     // ── spectate_table ─────────────────────────────────────────────────────
@@ -193,6 +269,7 @@ nextApp.prepare().then(() => {
       }
 
       socket.data.joinedTables.add(tableId)
+      // Note: spectators do NOT go into seatedAtTables
       socket.join(`table:${tableId}`)
 
       socket.emit('spectator_joined', { tableId })
@@ -206,6 +283,7 @@ nextApp.prepare().then(() => {
       await leaveTable(supabase, tableId, userId)
 
       socket.data.joinedTables.delete(tableId)
+      socket.data.seatedAtTables.delete(tableId)
       socket.leave(`table:${tableId}`)
 
       socket.emit('table_left', { tableId })
@@ -216,8 +294,9 @@ nextApp.prepare().then(() => {
 
     // ── start_hand ─────────────────────────────────────────────────────────
     socket.on('start_hand', async ({ tableId }) => {
-      if (!socket.data.joinedTables.has(tableId)) {
-        socket.emit('socket_error', { message: 'You are not at this table' })
+      // Only seated players may start a hand.
+      if (!socket.data.seatedAtTables.has(tableId)) {
+        socket.emit('socket_error', { message: 'You must be seated to start a hand' })
         return
       }
 
@@ -226,7 +305,6 @@ nextApp.prepare().then(() => {
         return
       }
 
-      // Load table config (blinds, status).
       const { data: tableData } = await supabase
         .from('poker_tables')
         .select('small_blind, big_blind, status')
@@ -243,7 +321,6 @@ nextApp.prepare().then(() => {
         big_blind: number
       }
 
-      // Load currently seated players.
       const { data: playersData } = await supabase
         .from('table_players')
         .select('player_id, seat_number')
@@ -257,7 +334,6 @@ nextApp.prepare().then(() => {
         return
       }
 
-      // Resolve usernames.
       const { data: profilesData } = await supabase
         .from('profiles')
         .select('id, username')
@@ -291,21 +367,35 @@ nextApp.prepare().then(() => {
         if (cards) s.emit('deal_cards', { tableId, holeCards: cards })
       }
 
-      // Broadcast the full public state.
+      // Start the turn timer for the first actor.
+      const firstState = gm.getPublicHandState(tableId)
+      if (firstState?.currentTurnPlayerId) {
+        startTurnTimer(tableId, firstState.currentTurnPlayerId)
+      }
+
       const state = await buildTableState(supabase, tableId)
       if (state) io.to(`table:${tableId}`).emit('table_state', state)
     })
 
     // ── player_action ──────────────────────────────────────────────────────
     socket.on('player_action', async ({ tableId, action, amount }) => {
-      if (!socket.data.joinedTables.has(tableId)) {
-        socket.emit('socket_error', { message: 'You are not at this table' })
+      // Reject actions from spectators and players not at this table.
+      if (!socket.data.seatedAtTables.has(tableId)) {
+        socket.emit('socket_error', { message: 'You must be seated to act' })
         return
       }
+
+      // Clear the turn timer immediately — player acted in time.
+      clearTurnTimer(tableId)
 
       const result = gm.processAction(tableId, userId, action, amount)
 
       if ('error' in result) {
+        // Restart timer: player sent an invalid action but it's still their turn.
+        const current = gm.getPublicHandState(tableId)
+        if (current?.currentTurnPlayerId) {
+          startTurnTimer(tableId, current.currentTurnPlayerId)
+        }
         socket.emit('socket_error', { message: result.error })
         return
       }
@@ -314,7 +404,6 @@ nextApp.prepare().then(() => {
         `[game] action  table=${tableId} user=${username} action=${action}${amount != null ? ` amount=${amount}` : ''}`,
       )
 
-      // Broadcast the action to the room.
       io.to(`table:${tableId}`).emit('action_result', {
         tableId,
         playerId: userId,
@@ -327,14 +416,18 @@ nextApp.prepare().then(() => {
         console.log(
           `[game] hand ended  table=${tableId} reason=${result.data.reason} hand=${result.data.handNumber}`,
         )
-
         try {
           await persistHandResult(supabase, result.data, showdown)
         } catch (err) {
           console.error('[game] Failed to persist hand result:', err)
         }
-
         io.to(`table:${tableId}`).emit('showdown_result', showdown)
+      } else {
+        // Start timer for the next actor.
+        const next = gm.getPublicHandState(tableId)
+        if (next?.currentTurnPlayerId) {
+          startTurnTimer(tableId, next.currentTurnPlayerId)
+        }
       }
 
       const state = await buildTableState(supabase, tableId)
@@ -343,10 +436,15 @@ nextApp.prepare().then(() => {
 
     // ── disconnect ─────────────────────────────────────────────────────────
     socket.on('disconnect', async () => {
-      console.log(`[socket] disconnected user=${username} socket=${socket.id}`)
+      console.log(`[socket] disconnected  user=${username} socket=${socket.id}`)
 
       for (const tableId of socket.data.joinedTables) {
-        await leaveTable(supabase, tableId, userId)
+        // Keep the seat if a hand is active — the turn timer handles timeouts.
+        // Only free the seat immediately when no hand is running.
+        if (!gm.hasActiveHand(tableId)) {
+          await leaveTable(supabase, tableId, userId)
+        }
+        // Broadcast so other clients see the updated table state.
         const state = await buildTableState(supabase, tableId)
         if (state) io.to(`table:${tableId}`).emit('table_state', state)
       }
