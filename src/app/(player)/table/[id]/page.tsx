@@ -11,35 +11,41 @@ export default async function TablePage({
 }) {
   const { id: tableId } = await params
 
-  // Auth check (layout also handles this, but defense in depth).
   const supabase = await createClient()
   const {
     data: { user },
   } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  // Use admin client for full data access (reads other players' profiles).
   const admin = createAdminClient()
 
-  // Ensure this player has an active entry at this table.
-  const { data: entryData } = await admin
-    .from('table_players')
-    .select('status, seat_number')
-    .eq('table_id', tableId)
-    .eq('player_id', user.id)
-    .neq('status', 'left')
-    .maybeSingle()
+  const [entryRes, profileRes] = await Promise.all([
+    admin
+      .from('table_players')
+      .select('status, seat_number')
+      .eq('table_id', tableId)
+      .eq('player_id', user.id)
+      .neq('status', 'left')
+      .maybeSingle(),
+    admin
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single(),
+  ])
 
-  if (!entryData) redirect('/lobby')
+  const isAdmin = (profileRes.data as { role?: string } | null)?.role === 'admin'
+  const exitRoute = isAdmin ? '/admin/dashboard' : '/lobby'
 
-  const entry = entryData as {
+  if (!entryRes.data) redirect(exitRoute)
+
+  const entry = entryRes.data as {
     status: 'seated' | 'spectating'
     seat_number: number | null
   }
 
-  // Get the full public table state.
   const state = await getTableState(admin, tableId)
-  if (!state) redirect('/lobby')
+  if (!state) redirect(exitRoute)
 
   return (
     <TableRoom
@@ -47,6 +53,7 @@ export default async function TablePage({
       currentUserId={user.id}
       myStatus={entry.status}
       mySeatNumber={entry.seat_number}
+      isAdmin={isAdmin}
     />
   )
 }

@@ -11,12 +11,22 @@ export default function LoginPage() {
   )
 
   return (
-    <main className="flex min-h-full flex-col items-center justify-center">
-      <div className="w-full max-w-sm space-y-6 px-6 py-10">
-        <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+    <main className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 px-5 py-10">
+      <div className="w-full max-w-sm space-y-8">
+
+        {/* Branding */}
+        <div className="text-center">
+          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-emerald-600/20 text-3xl">
+            ♠
+          </div>
+          <h1 className="text-3xl font-black tracking-tight text-zinc-100">Poker</h1>
+          <p className="mt-1 text-sm text-zinc-500">Private Texas Hold&apos;em</p>
+        </div>
+
+        {/* Form */}
         <form action={action} className="space-y-4">
-          <div className="space-y-1">
-            <label htmlFor="email" className="block text-sm font-medium">
+          <div className="space-y-2">
+            <label htmlFor="email" className="block text-sm font-semibold text-zinc-300">
               Email
             </label>
             <input
@@ -25,11 +35,13 @@ export default function LoginPage() {
               type="email"
               required
               autoComplete="email"
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+              inputMode="email"
+              className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3.5 text-base text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 transition-colors"
             />
           </div>
-          <div className="space-y-1">
-            <label htmlFor="password" className="block text-sm font-medium">
+
+          <div className="space-y-2">
+            <label htmlFor="password" className="block text-sm font-semibold text-zinc-300">
               Password
             </label>
             <input
@@ -38,20 +50,22 @@ export default function LoginPage() {
               type="password"
               required
               autoComplete="current-password"
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+              className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-3.5 text-base text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/20 transition-colors"
             />
           </div>
+
           {state?.error && (
-            <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-              {state.error}
-            </p>
+            <div className="rounded-xl border border-red-900/50 bg-red-900/20 px-4 py-3">
+              <p className="text-sm text-red-400">{state.error}</p>
+            </div>
           )}
+
           <button
             type="submit"
             disabled={pending}
-            className="w-full rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+            className="w-full rounded-xl bg-emerald-600 py-4 text-base font-bold text-white transition-colors hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-50"
           >
-            {pending ? 'Signing in…' : 'Sign in'}
+            {pending ? 'Signing in…' : 'Sign In'}
           </button>
         </form>
       </div>

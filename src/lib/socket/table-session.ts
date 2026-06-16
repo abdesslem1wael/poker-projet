@@ -24,7 +24,7 @@ type PlayerRow = {
   status: 'seated' | 'spectating'
 }
 
-type ProfileRow = { id: string; username: string }
+type ProfileRow = { id: string; username: string; avatar_id: number | null }
 
 // ── Read ───────────────────────────────────────────────────────────────────
 
@@ -50,24 +50,26 @@ export async function getTableState(
   const players = (playersData as PlayerRow[] | null) ?? []
   const playerIds = players.map((p) => p.player_id)
 
-  const usernameMap = new Map<string, string>()
+  const profileMap = new Map<string, { username: string; avatarId: number | null }>()
   if (playerIds.length > 0) {
     const { data: profilesData } = await supabase
       .from('profiles')
-      .select('id, username')
+      .select('id, username, avatar_id')
       .in('id', playerIds)
     for (const p of (profilesData as ProfileRow[] | null) ?? []) {
-      usernameMap.set(p.id, p.username)
+      profileMap.set(p.id, { username: p.username, avatarId: p.avatar_id })
     }
   }
 
-  const seatMap = new Map<number, { playerId: string; username: string }>()
+  const seatMap = new Map<number, { playerId: string; username: string; avatarId: number | null }>()
   const spectators: SpectatorInfo[] = []
 
   for (const p of players) {
-    const username = usernameMap.get(p.player_id) ?? 'Unknown'
+    const prof = profileMap.get(p.player_id)
+    const username = prof?.username ?? 'Unknown'
+    const avatarId = prof?.avatarId ?? null
     if (p.status === 'seated' && p.seat_number != null) {
-      seatMap.set(p.seat_number, { playerId: p.player_id, username })
+      seatMap.set(p.seat_number, { playerId: p.player_id, username, avatarId })
     } else if (p.status === 'spectating') {
       spectators.push({ playerId: p.player_id, username })
     }
@@ -80,6 +82,7 @@ export async function getTableState(
       seatNumber: n,
       playerId: occupant?.playerId ?? null,
       username: occupant?.username ?? null,
+      avatarId: occupant?.avatarId ?? null,
     }
   })
 

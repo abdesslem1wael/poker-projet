@@ -5,13 +5,19 @@ import { useRouter } from 'next/navigation'
 import type {
   TableStatePayload,
   Card,
+  CardRank,
+  CardSuit,
   BettingAction,
   ShowdownPayload,
   PublicHandState,
+  PublicPlayerHandState,
+  SeatInfo,
+  ChatMessage,
 } from '@/lib/socket/types'
 import { getSocket } from '@/lib/socket/client'
 import type { AppSocket } from '@/lib/socket/client'
-import { getAvatar } from '@/lib/avatars'
+import { soundManager } from '@/lib/sounds'
+import type { SoundName } from '@/lib/sounds'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -35,6 +41,9 @@ type SessionInfo = {
 type LastAction = { action: BettingAction; amount?: number }
 type PreAction  = 'auto-check' | 'check-fold' | 'auto-fold'
 
+const CHAT_MAX_LEN = 200
+const CHAT_HISTORY_LIMIT = 50
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,12 +53,16 @@ const SUIT_SYM: Record<string, string> = {
 }
 const RED_SUITS = new Set(['diamonds', 'hearts'])
 
+function formatNumber(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
 function formatAction(la: LastAction): string {
   switch (la.action) {
     case 'FOLD':   return 'Folded'
     case 'CHECK':  return 'Checked'
-    case 'CALL':   return `Called ${la.amount?.toLocaleString() ?? ''}`
-    case 'RAISE':  return `Raised → ${la.amount?.toLocaleString() ?? ''}`
+    case 'CALL':   return `Called ${la.amount !== undefined ? formatNumber(la.amount) : ''}`
+    case 'RAISE':  return `Raised → ${la.amount !== undefined ? formatNumber(la.amount) : ''}`
     case 'ALL_IN': return 'All In!'
     default:       return la.action
   }
@@ -79,33 +92,155 @@ function toVisual(actual: number, anchor: number, max: number): number {
 function seatPos(vs: number, max: number): React.CSSProperties {
   // +angle = clockwise (vs=2 is to the left of vs=1 when hero is at bottom)
   const rad = ((180 + (vs - 1) * (360 / max)) * Math.PI) / 180
-  const yScale = vs === 1 ? 45 : 42
+
+  // Hero seat sits lower and cleaner below the oval table:
+  // [ Avatar ] [ Cards ] [ Name / Stack ]
+  // Opponent pods sit near the rail/edge of the felt rather than on top of it.
+  const xRadius = vs === 1 ? 41 : 45
+  const yScale = vs === 1 ? 46 : 50
+
   return {
     position: 'absolute',
-    left: `${(50 + 46 * Math.sin(rad)).toFixed(2)}%`,
-    top:  `${(50 - yScale * Math.cos(rad)).toFixed(2)}%`,
+    left: `${(50 + xRadius * Math.sin(rad)).toFixed(2)}%`,
+    top: `${(50 - yScale * Math.cos(rad)).toFixed(2)}%`,
     transform: 'translate(-50%,-50%)',
-    zIndex: vs === 1 ? 20 : 10,
+    zIndex: vs === 1 ? 30 : 10,
   }
 }
 
+// Bet chips sit on the "betting line" — inside the seat pod radius, between
+// the player and the community cards in the centre of the table.
 function chipPos(vs: number, max: number): React.CSSProperties {
   const rad = ((180 + (vs - 1) * (360 / max)) * Math.PI) / 180
   return {
     position: 'absolute',
-    left: `${(50 + 27 * Math.sin(rad)).toFixed(2)}%`,
-    top:  `${(50 - 24 * Math.cos(rad)).toFixed(2)}%`,
+    left: `${(50 + 30 * Math.sin(rad)).toFixed(2)}%`,
+    top:  `${(50 - 28 * Math.cos(rad)).toFixed(2)}%`,
     transform: 'translate(-50%,-50%)',
   }
 }
 
-// Deterministic avatar fallback so nobody ever sees a "?" on the table.
-function fallbackAvatarId(username: string | null): number {
-  if (!username) return 1
-  let h = 0
-  for (const c of username) h = ((h * 31) + c.charCodeAt(0)) & 0x7fffffff
-  return (h % 20) + 1
+// ─────────────────────────────────────────────────────────────────────────────
+// Mobile-landscape seat presets — FIXED coordinates per table size (2-9
+// players), not the continuous oval math above. On a phone in landscape,
+// opponent pods stack their content vertically (avatar / cards / pill) and
+// are centred on a hand-picked point, so every pod, card, pill, chip and
+// timer stays on-screen and non-overlapping at every seat count — verified
+// numerically for table-area heights from 200px to 400px. The oval formula
+// above is kept as-is for desktop. Hero (vs=1) is excluded — it is always
+// positioned via the `.tbl-hero-seat` CSS class.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type MobileSeatSlot = {
+  left: number              // % of the table box (always centred horizontally on this point)
+  top: number                // % of the table box
+  vAnchor: 'mid' | 'top'      // 'top' = anchored at the seat's top edge (near the top rail);
+                              // 'mid' = anchored at vertical centre (down the left/right rails)
 }
+
+// One entry per opponent visual seat (vs = 2..max), indexed by table size.
+const MOBILE_SEAT_PRESETS: Record<number, MobileSeatSlot[]> = {
+  2: [
+    { left: 75, top: 85, vAnchor: 'mid' },
+  ],
+
+  3: [
+    { left: 15, top: 30, vAnchor: 'mid' },
+    { left: 85, top: 30, vAnchor: 'mid' },
+  ],
+
+  4: [
+    { left: 10, top: 62, vAnchor: 'mid' },
+    { left: 75, top: 85, vAnchor: 'mid' },
+    { left: 90, top: 62, vAnchor: 'mid' },
+  ],
+
+  5: [
+    { left: 10, top: 70, vAnchor: 'mid' },
+    { left: 25, top: 18, vAnchor: 'top' },
+    { left: 75, top: 18, vAnchor: 'top' },
+    { left: 90, top: 70, vAnchor: 'mid' },
+  ],
+
+  6: [
+    { left: 10, top: 70, vAnchor: 'mid' },
+    { left: 20, top: 23, vAnchor: 'top' },
+    { left: 75, top: 85, vAnchor: 'mid' },
+    { left: 80, top: 23, vAnchor: 'top' },
+    { left: 90, top: 70, vAnchor: 'mid' },
+  ],
+
+  7: [
+    { left: 30, top: 84, vAnchor: 'mid' },
+    { left: 10, top: 68, vAnchor: 'mid' },
+    { left: 18, top: 23, vAnchor: 'top' },
+    { left: 50, top: 10, vAnchor: 'top' },
+    { left: 82, top: 23, vAnchor: 'top' },
+    { left: 75, top: 84, vAnchor: 'mid' },
+  ],
+
+  8: [
+    { left: 30, top: 84, vAnchor: 'mid' },
+    { left: 10, top: 70, vAnchor: 'mid' },
+    { left: 15, top: 23, vAnchor: 'top' },
+    { left: 35, top: 10, vAnchor: 'top' },
+    { left: 65, top: 10, vAnchor: 'top' },
+    { left: 85, top: 23, vAnchor: 'top' },
+    { left: 75, top: 84, vAnchor: 'mid' },
+  ],
+
+  9: [
+    { left: 30, top: 84, vAnchor: 'mid' },
+    { left: 10, top: 70, vAnchor: 'mid' },
+    { left: 15, top: 23, vAnchor: 'top' },
+    { left: 35, top: 10, vAnchor: 'top' },
+    { left: 59, top: 10, vAnchor: 'top' },
+    { left: 75, top: 17, vAnchor: 'top' },
+    { left: 90, top: 65, vAnchor: 'mid' },
+    { left: 75, top: 85, vAnchor: 'mid' },
+  ],
+}
+
+function mobileSeatSlot(vs: number, max: number): MobileSeatSlot {
+  if (vs === 1) return { left: 50, top: 88, vAnchor: 'mid' } // hero — overridden by .tbl-hero-seat
+  const presets = MOBILE_SEAT_PRESETS[max] ?? MOBILE_SEAT_PRESETS[9]
+  return presets[vs - 2] ?? presets[presets.length - 1]
+}
+
+// CSS class selecting the vertical anchor edge — pods are always centred
+// horizontally, so only "anchored at the top rail" vs "anchored at vertical
+// centre down the side rail" need different transform-origin/translate rules.
+function mobileAnchorClass(vs: number, max: number): string {
+  if (vs === 1) return 'tbl-hero-seat'
+  return mobileSeatSlot(vs, max).vAnchor === 'top' ? 'tbl-pod-vtop' : 'tbl-pod-vmid'
+}
+
+// Custom properties consumed only inside the mobile-landscape media query —
+// desktop ignores them entirely and keeps using seatPos()/chipPos() above.
+function mobileSeatVars(vs: number, max: number): React.CSSProperties {
+  if (vs === 1) return {}
+  const slot = mobileSeatSlot(vs, max)
+  const mty = slot.vAnchor === 'top' ? '0%' : '-50%'
+  return { '--mleft': `${slot.left}%`, '--mtop': `${slot.top}%`, '--mty': mty } as React.CSSProperties
+}
+
+// Bet chips sit between the seat and the pot — interpolate the preset
+// coordinate toward the table centre rather than maintaining a second table.
+function mobileChipVars(vs: number, max: number): React.CSSProperties {
+  const slot = mobileSeatSlot(vs, max)
+  const left = 50 + (slot.left - 50) * 0.55
+  const top  = 50 + (slot.top - 50) * 0.55
+  return { '--mleft': `${left.toFixed(1)}%`, '--mtop': `${top.toFixed(1)}%` } as React.CSSProperties
+}
+
+// Opponent pod content (avatar/cards/pill) scales down as more seats are in
+// play so a 9-max table still fits a phone screen in landscape. The
+// `@media (max-height:380px)` block overrides --mscale further for very
+// short viewports — see mobileSeatVars()/the seat-pod CSS for how it's used.
+function mobileDensityScale(max: number): number {
+  if (max <= 4) return 0.85
+  if (max <= 6) return 0.72
+  return 0.64}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pip positions for number cards
@@ -249,29 +384,10 @@ function CardBack({ size }: { size: CardSize }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TimerRing
+// Timer
 // ─────────────────────────────────────────────────────────────────────────────
 
 const TIMER_TOTAL = 60
-
-function TimerRing({ t }: { t: number }) {
-  const r = 24
-  const circ = 2 * Math.PI * r
-  const dash = Math.max(0, (t / TIMER_TOTAL) * circ)
-  const low = t <= 15
-  return (
-    <svg viewBox="0 0 52 52" fill="none" className="absolute inset-0 h-full w-full"
-      style={{ transform: 'rotate(-90deg)' }}>
-      <circle cx="26" cy="26" r={r} stroke="rgba(255,255,255,0.08)" strokeWidth="2.5" />
-      <circle cx="26" cy="26" r={r}
-        stroke={low ? '#ef4444' : '#eab308'}
-        strokeWidth="2.5"
-        strokeDasharray={`${dash.toFixed(2)} ${circ.toFixed(2)}`}
-        strokeLinecap="round"
-      />
-    </svg>
-  )
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChipStack
@@ -285,18 +401,34 @@ function chipColor(amount: number): string[] {
   return ['#92400e', '#d97706', '#fbbf24']
 }
 
+// Compact chip label: 2.1M / 19.6M above 1M, 12k / 497k above 10k, 1.2k-style below that.
+function formatChipAmount(amount: number): string {
+  if (amount >= 1_000_000) {
+    const v = amount / 1_000_000
+    return `${v % 1 === 0 ? v.toFixed(0) : v.toFixed(1)}M`
+  }
+  if (amount >= 10_000) {
+    return `${Math.round(amount / 1000)}k`
+  }
+  if (amount >= 1000) {
+    const v = amount / 1000
+    return `${v % 1 === 0 ? v.toFixed(0) : v.toFixed(1)}k`
+  }
+  return `${amount}`
+}
+
 function ChipStack({ amount }: { amount: number }) {
   const colors = chipColor(amount)
   const layers = Math.min(5, Math.max(2, Math.floor(Math.log10(amount + 1))))
   return (
     <div className="flex flex-col items-center">
-      <div style={{ position: 'relative', width: 20, height: 20 + layers * 2 }}>
+      <div style={{ position: 'relative', width: 15, height: 15 + layers * 2 }}>
         {Array.from({ length: layers }).map((_, i) => (
           <span key={i} style={{
-            position: 'absolute', bottom: i * 3, left: 0,
-            width: 20, height: 20, borderRadius: '50%',
+            position: 'absolute', bottom: i * 2, left: 0,
+            width: 15, height: 15, borderRadius: '50%',
             background: `radial-gradient(circle at 35% 35%, ${colors[Math.min(i, colors.length - 1)]}, ${colors[0]})`,
-            border: '1.5px solid rgba(255,255,255,0.25)',
+            border: '1px solid rgba(255,255,255,0.25)',
             boxShadow: i === 0 ? '0 2px 4px rgba(0,0,0,0.5)' : 'none',
           }} />
         ))}
@@ -304,10 +436,10 @@ function ChipStack({ amount }: { amount: number }) {
       <span style={{
         marginTop: 2,
         background: 'rgba(0,0,0,0.8)',
-        color: '#fbbf24', fontSize: 9, fontWeight: 700,
-        padding: '1px 4px', borderRadius: 3, letterSpacing: '-0.3px', whiteSpace: 'nowrap',
+        color: '#fbbf24', fontSize: 8, fontWeight: 700,
+        padding: '1px 3px', borderRadius: 3, letterSpacing: '-0.3px', whiteSpace: 'nowrap',
       }}>
-        {amount >= 1000 ? `${(amount / 1000).toFixed(amount % 1000 === 0 ? 0 : 1)}k` : amount}
+        {formatChipAmount(amount)}
       </span>
     </div>
   )
@@ -409,20 +541,22 @@ function ShowdownBanner({
   const sidePots      = showdown.pots.slice(1)
 
   return (
-    <div style={{
+    <div className="tbl-showdown-panel" style={{
       pointerEvents: 'auto',
       background: 'rgba(4, 10, 22, 0.93)',
       border: '1px solid rgba(234,179,8,0.38)',
       borderRadius: 14, padding: '10px 14px',
       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 7,
       maxWidth: 400,
+      maxHeight: 'min(420px, 70vh)',
+      overflowY: 'auto',
       boxShadow: '0 0 0 1px rgba(234,179,8,0.1), 0 8px 40px rgba(0,0,0,0.75)',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <span style={{ fontSize: 15 }}>🏆</span>
         <span style={{ color: '#fde68a', fontWeight: 800, fontSize: 14 }}>{winnerLabel}</span>
         <span style={{ color: '#4ade80', fontWeight: 700, fontSize: 13, background: 'rgba(74,222,128,0.1)', borderRadius: 6, padding: '1px 6px' }}>
-          +{winnerNet.toLocaleString()}
+          +{formatNumber(winnerNet)}
         </span>
       </div>
 
@@ -472,7 +606,7 @@ function ShowdownBanner({
             return (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10 }}>
                 <span style={{ color: '#475569' }}>Side pot</span>
-                <span style={{ color: '#fbbf24', fontWeight: 700 }}>{pot.amount.toLocaleString()}</span>
+                <span style={{ color: '#fbbf24', fontWeight: 700 }}>{formatNumber(pot.amount)}</span>
                 <span style={{ color: '#86efac' }}>→ {potWinners.map(w => w.username).join(' & ')}</span>
                 {pot.winnerHandName !== 'Last Standing' && (
                   <span style={{ color: '#475569' }}>({pot.winnerHandName})</span>
@@ -518,7 +652,7 @@ function ShowdownBanner({
                   )}
                   <div style={{ flex: 1 }} />
                   <span style={{ color: p.netChipChange > 0 ? '#4ade80' : '#f87171', fontWeight: 700, fontSize: 11, flexShrink: 0 }}>
-                    {p.netChipChange > 0 ? '+' : ''}{p.netChipChange.toLocaleString()}
+                    {p.netChipChange > 0 ? '+' : ''}{formatNumber(p.netChipChange)}
                   </span>
                   {showButtons && (
                     <div style={{ display: 'flex', gap: 3, marginLeft: 2, flexShrink: 0 }}>
@@ -567,7 +701,7 @@ function DealerTipModal({ winAmount, onTip, onSkip }: {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <div>
           <div style={{ color: '#fbbf24', fontSize: 13, fontWeight: 700 }}>Tip the dealer?</div>
-          <div style={{ color: '#475569', fontSize: 10, marginTop: 1 }}>Won {winAmount.toLocaleString()}</div>
+          <div style={{ color: '#475569', fontSize: 10, marginTop: 1 }}>Won {formatNumber(winAmount)}</div>
         </div>
         <button onClick={onSkip} style={{ background: 'transparent', border: 'none', color: '#475569', fontSize: 16, cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}>✕</button>
       </div>
@@ -581,7 +715,7 @@ function DealerTipModal({ winAmount, onTip, onSkip }: {
               onMouseLeave={e => (e.currentTarget.style.background = 'rgba(201,168,76,0.07)')}
             >
               <div style={{ fontSize: 14, fontWeight: 700, color: '#fbbf24' }}>{pct}%</div>
-              <div style={{ fontSize: 9, color: '#64748b', marginTop: 1 }}>{amt.toLocaleString()}</div>
+              <div style={{ fontSize: 9, color: '#64748b', marginTop: 1 }}>{formatNumber(amt)}</div>
             </button>
           )
         })}
@@ -604,6 +738,68 @@ function DealerTipModal({ winAmount, onTip, onSkip }: {
 // ─────────────────────────────────────────────────────────────────────────────
 // Main component
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEV-ONLY mobile layout preview
+// Flip ENABLED to true locally to render a fake table with FAKE_SEAT_COUNT
+// (2-9) seats, for visually testing the mobile seat layout above without a
+// real table, real opponents, or a running hand. This only swaps the data
+// fed into the seat-rendering JSX below — it never touches sockets, the
+// database, or any betting/hand/pot/showdown logic, and `process.env.NODE_ENV`
+// forces it off in production builds regardless of this flag.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LAYOUT_PREVIEW_ENABLED    = false
+const LAYOUT_PREVIEW_SEAT_COUNT = 9
+
+function buildLayoutPreview(seatCount: number, currentUserId: string): {
+  seats: SeatInfo[]
+  hand: PublicHandState
+  myHoleCards: [Card, Card]
+} {
+  const ranks: CardRank[] = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2']
+  const suits: CardSuit[] = ['spades', 'hearts', 'diamonds', 'clubs']
+  let cardIdx = 0
+  const nextCard = (): Card => {
+    const c: Card = { rank: ranks[cardIdx % ranks.length], suit: suits[Math.floor(cardIdx / ranks.length) % suits.length] }
+    cardIdx++
+    return c
+  }
+
+  const seats: SeatInfo[] = Array.from({ length: seatCount }, (_, i) => ({
+    seatNumber: i + 1,
+    playerId: i === 0 ? currentUserId : `preview-bot-${i + 1}`,
+    username: i === 0 ? 'You' : `Bot ${i + 1}`,
+    avatarId: null,
+  }))
+
+  const players: PublicPlayerHandState[] = seats.map((s, i) => ({
+    playerId: s.playerId as string,
+    seatNumber: s.seatNumber,
+    stack: 8000 - i * 350,
+    roundContribution: i === 1 ? 100 : i === 2 ? 200 : 0,
+    totalContributed: i === 1 ? 100 : i === 2 ? 200 : 0,
+    playerPhase: seatCount > 4 && i === 4 ? 'folded' : seatCount > 5 && i === 5 ? 'all-in' : 'active',
+    hasActedThisRound: i !== 3 % seatCount,
+  }))
+
+  const hand: PublicHandState = {
+    handNumber: 0,
+    phase: 'PRE_FLOP',
+    pot: 300,
+    currentBet: 200,
+    minRaise: 200,
+    currentTurnPlayerId: seats[3 % seatCount]?.playerId ?? null,
+    dealerSeatNumber: seats[seatCount - 1].seatNumber,
+    smallBlindSeatNumber: seats[1].seatNumber,
+    bigBlindSeatNumber: seats[2 % seatCount].seatNumber,
+    communityCards: [],
+    players,
+  }
+
+  const myHoleCards: [Card, Card] = [nextCard(), nextCard()]
+  return { seats, hand, myHoleCards }
+}
 
 function formatSessionTime(seconds: number): string {
   if (seconds <= 0) return '0:00'
@@ -638,16 +834,57 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [sessionInfo, setSessionInfo]    = useState<SessionInfo | null>(null)
   const [sessionDisplay, setSessionDisplay] = useState<number>(0)
   const [kickedMsg, setKickedMsg]        = useState<string | null>(null)
+  const [muted, setMuted]                = useState(false)
+  const [myCurrentStatus, setMyCurrentStatus] = useState<'seated' | 'spectating'>(myStatus)
+  const [outOfChipsMsg, setOutOfChipsMsg] = useState(false)
+  const [isFullscreen, setIsFullscreen]   = useState(false)
+  const [theaterMode, setTheaterMode]     = useState(false)
+  const [showIosInstructions, setShowIosInstructions] = useState(false)
+  const [chatMessages, setChatMessages]   = useState<ChatMessage[]>([])
+  const [chatInput, setChatInput]         = useState('')
+  const [chatOpen, setChatOpen]           = useState(false)
+  const [unreadChatCount, setUnreadChatCount] = useState(0)
+  // Animation state: hero hole cards revealed one by one, opponent backs per seat, community cards one by one
+  const [visibleHoleCount, setVisibleHoleCount] = useState<0 | 1 | 2>(
+    initialState.handState ? 2 : 2
+  )
+  const [dealtSeatNumbers, setDealtSeatNumbers] = useState<Set<number>>(() => {
+    const s = new Set<number>()
+    initialState.handState?.players.forEach(p => s.add(p.seatNumber))
+    return s
+  })
+  const [visibleCommunityCount, setVisibleCommunityCount] = useState(
+    initialState.handState?.communityCards.length ?? 0
+  )
 
   const nextHandTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null)
   const socketRef          = useRef<AppSocket | null>(null)
   const prevShowdownRef    = useRef<ShowdownPayload | null>(null)
   const sessionRef         = useRef<SessionInfo | null>(null)
+  const mutedRef           = useRef(false)
+  const heroCardTimersRef  = useRef<ReturnType<typeof setTimeout>[]>([])
+  const seatAnimTimersRef  = useRef<ReturnType<typeof setTimeout>[]>([])
+  const communityTimersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const currentHandRef     = useRef<PublicHandState | null>(initialState.handState)
+  const visibleCommunityCountRef = useRef(initialState.handState?.communityCards.length ?? 0)
+  const prevHandNumberRef  = useRef<number | null>(initialState.handState?.handNumber ?? null)
+  const chatOpenRef        = useRef(false)
+  const chatScrollRef      = useRef<HTMLDivElement | null>(null)
 
   // ── Derived values ──────────────────────────────────────────────────────────
-  const hand: PublicHandState | null = state.handState
-  const max    = state.maxPlayers
-  const anchor = mySeatNumber ?? 1
+  mutedRef.current = muted
+  chatOpenRef.current = chatOpen
+
+  // DEV-ONLY layout preview override — see buildLayoutPreview() above. A no-op
+  // unless LAYOUT_PREVIEW_ENABLED is manually flipped to true in a dev build.
+  const layoutPreviewActive = process.env.NODE_ENV !== 'production' && LAYOUT_PREVIEW_ENABLED
+  const layoutPreview = layoutPreviewActive ? buildLayoutPreview(LAYOUT_PREVIEW_SEAT_COUNT, currentUserId) : null
+
+  const hand: PublicHandState | null = layoutPreview ? layoutPreview.hand : state.handState
+  const max    = layoutPreview ? LAYOUT_PREVIEW_SEAT_COUNT : state.maxPlayers
+  const anchor = layoutPreview ? 1 : (mySeatNumber ?? 1)
+  const effectiveHoleCards = layoutPreview ? layoutPreview.myHoleCards : myHoleCards
+  const effectiveDealtSeats = layoutPreview ? new Set(layoutPreview.seats.map(s => s.seatNumber)) : dealtSeatNumbers
 
   const isMyTurn   = hand?.currentTurnPlayerId === currentUserId
   const myHP       = hand?.players.find(p => p.playerId === currentUserId)
@@ -660,7 +897,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const sessionActive  = sessionInfo != null && !sessionInfo.isExpired
   const sessionExpired = sessionInfo != null && sessionInfo.isExpired
   const canLeave   = !sessionActive || isAdmin
-  const canStart   = myStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired
+  const canStart   = myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired
 
   // Can I afford to call? If not, only all-in or fold is possible.
   const mustGoAllIn = !canCheck && callAmt > myStack
@@ -690,7 +927,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!turnTimerInfo) { setTimeLeft(0); return }
-    const tick = () => setTimeLeft(Math.max(0, Math.ceil((turnTimerInfo.endsAt - Date.now()) / 1000)))
+    const tick = () => {
+      const tl = Math.max(0, Math.ceil((turnTimerInfo.endsAt - Date.now()) / 1000))
+      setTimeLeft(tl)
+      if (tl > 0 && tl <= 10 && !mutedRef.current) soundManager.play('timer_warning')
+    }
     tick()
     const id = setInterval(tick, 250)
     return () => clearInterval(id)
@@ -707,6 +948,18 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
   }, [sessionInfo])
+
+  // Fullscreen change listener
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', handler)
+    return () => document.removeEventListener('fullscreenchange', handler)
+  }, [])
+
+  // Auto-scroll chat to the latest message
+  useEffect(() => {
+    if (chatScrollRef.current) chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight
+  }, [chatMessages, chatOpen])
 
   // ── Pre-action auto-fire ────────────────────────────────────────────────────
   // When our turn starts and a pre-action is queued, execute it immediately.
@@ -754,8 +1007,65 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
       const onTableState = (p: TableStatePayload) => {
         if (!active || p.tableId !== initialState.tableId) return
+        currentHandRef.current = p.handState
         setState(p)
-        if (!p.handState) setTurnTimerInfo(null)
+        if (!p.handState) {
+          setTurnTimerInfo(null)
+          setDealtSeatNumbers(new Set())
+          visibleCommunityCountRef.current = 0
+          setVisibleCommunityCount(0)
+        }
+
+        // Detect demotion to spectating due to zero chips
+        const nowSpectating = p.spectators.some(s => s.playerId === currentUserId)
+        const nowSeated = p.seats.some(s => s.playerId === currentUserId)
+        if (nowSpectating && !nowSeated) {
+          setMyCurrentStatus('spectating')
+          setOutOfChipsMsg(true)
+        }
+
+        // Animate opponent card backs when a new hand starts
+        if (p.handState) {
+          // Detect new hand by handNumber; reset seat animation so every deal animates
+          if (p.handState.handNumber !== prevHandNumberRef.current) {
+            prevHandNumberRef.current = p.handState.handNumber
+            seatAnimTimersRef.current.forEach(clearTimeout); seatAnimTimersRef.current = []
+            setDealtSeatNumbers(new Set())
+          }
+
+          const opponentSeats = p.handState.players
+            .filter(pl => pl.playerId !== currentUserId)
+            .map(pl => pl.seatNumber)
+          setDealtSeatNumbers(prev => {
+            const toAdd = opponentSeats.filter(n => !prev.has(n))
+            if (toAdd.length === 0) return prev
+            toAdd.forEach((seatNum, i) => {
+              seatAnimTimersRef.current.push(setTimeout(() => {
+                if (!active) return
+                setDealtSeatNumbers(prevS => { const ns = new Set(prevS); ns.add(seatNum); return ns })
+                if (!mutedRef.current) soundManager.play('card_deal')
+              }, 200 + i * 200))
+            })
+            return prev
+          })
+
+          // Animate community cards when new ones arrive
+          const newCount = p.handState.communityCards.length
+          const prevCount = visibleCommunityCountRef.current
+          if (newCount > prevCount) {
+            communityTimersRef.current.forEach(clearTimeout)
+            communityTimersRef.current = []
+            for (let i = prevCount; i < newCount; i++) {
+              const targetCount = i + 1
+              communityTimersRef.current.push(setTimeout(() => {
+                if (!active) return
+                visibleCommunityCountRef.current = targetCount
+                setVisibleCommunityCount(targetCount)
+                if (!mutedRef.current) soundManager.play('card_deal')
+              }, (i - prevCount) * 280))
+            }
+          }
+        }
       }
 
       const onDealCards = (p: { tableId: string; holeCards: [Card, Card] }) => {
@@ -775,6 +1085,27 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         setPreAction(null)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
         setNextHandIn(null)
+
+        // Reset animation state — onTableState handles scheduling opponent seat timers
+        heroCardTimersRef.current.forEach(clearTimeout); heroCardTimersRef.current = []
+        seatAnimTimersRef.current.forEach(clearTimeout); seatAnimTimersRef.current = []
+        communityTimersRef.current.forEach(clearTimeout); communityTimersRef.current = []
+        setVisibleHoleCount(0)
+        setDealtSeatNumbers(new Set())
+        visibleCommunityCountRef.current = 0
+        setVisibleCommunityCount(0)
+
+        // Animate hero hole cards one by one
+        heroCardTimersRef.current.push(setTimeout(() => {
+          if (!active) return
+          setVisibleHoleCount(1)
+          if (!mutedRef.current) soundManager.play('card_deal')
+        }, 120))
+        heroCardTimersRef.current.push(setTimeout(() => {
+          if (!active) return
+          setVisibleHoleCount(2)
+          if (!mutedRef.current) soundManager.play('card_deal')
+        }, 350))
       }
 
       const onShowdownResult = (p: ShowdownPayload) => {
@@ -809,6 +1140,13 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           ...prev,
           [p.playerId]: { action: p.action, amount: p.amount > 0 ? p.amount : undefined },
         }))
+        if (p.playerId !== currentUserId && !mutedRef.current) {
+          const sndMap: Partial<Record<BettingAction, SoundName>> = {
+            FOLD: 'fold', CHECK: 'check', CALL: 'call', RAISE: 'raise', ALL_IN: 'all_in',
+          }
+          const snd = sndMap[p.action]
+          if (snd) soundManager.play(snd)
+        }
       }
 
       const onTurnTimerStart = (p: { tableId: string; playerId: string; seconds: number }) => {
@@ -839,7 +1177,16 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       const onKickedFromTable = (p: { tableId: string }) => {
         if (!active || p.tableId !== initialState.tableId) return
         setKickedMsg('You have been removed from this table by the admin.')
-        setTimeout(() => { if (active) router.push('/lobby') }, 2500)
+        setTimeout(() => { if (active) router.push(isAdmin ? '/admin/dashboard' : '/lobby') }, 2500)
+      }
+
+      const onChatMessage = (p: ChatMessage) => {
+        if (!active || p.tableId !== initialState.tableId) return
+        setChatMessages(prev => {
+          const next = [...prev, p]
+          return next.length > CHAT_HISTORY_LIMIT ? next.slice(next.length - CHAT_HISTORY_LIMIT) : next
+        })
+        if (!chatOpenRef.current) setUnreadChatCount(c => c + 1)
       }
 
       socket.on('connect', onConnect)
@@ -855,6 +1202,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('hand_revealed', onHandRevealed)
       socket.on('session_update', onSessionUpdate)
       socket.on('kicked_from_table', onKickedFromTable)
+      socket.on('table_chat_message', onChatMessage)
 
       if (socket.connected) {
         socket.emit(myStatus === 'seated' ? 'join_table' : 'spectate_table', { tableId: initialState.tableId })
@@ -869,7 +1217,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('turn_timer_start', onTurnTimerStart); socket.off('next_hand_countdown', onNextHandCountdown)
         socket.off('runout_cards_revealed', onRunoutCardsRevealed); socket.off('hand_revealed', onHandRevealed)
         socket.off('session_update', onSessionUpdate); socket.off('kicked_from_table', onKickedFromTable)
+        socket.off('table_chat_message', onChatMessage)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
+        heroCardTimersRef.current.forEach(clearTimeout); heroCardTimersRef.current = []
+        seatAnimTimersRef.current.forEach(clearTimeout); seatAnimTimersRef.current = []
+        communityTimersRef.current.forEach(clearTimeout); communityTimersRef.current = []
       }
     })
 
@@ -881,12 +1233,13 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
   function handleLeave() {
     setLeaving(true)
+    const exitRoute = isAdmin ? '/admin/dashboard' : '/lobby'
     const s = socketRef.current
-    if (!s) { router.push('/lobby'); return }
+    if (!s) { router.push(exitRoute); return }
     const onLeft = ({ tableId }: { tableId: string }) => {
       if (tableId !== initialState.tableId) return
       s.off('table_left', onLeft)
-      router.push('/lobby')
+      router.push(exitRoute)
     }
     s.on('table_left', onLeft)
     s.emit('leave_table', { tableId: initialState.tableId })
@@ -899,6 +1252,14 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
   function sendAction(action: BettingAction, amount?: number) {
     setSocketError(null)
+    soundManager.unlock() // warm up AudioContext on first gesture
+    if (!mutedRef.current) {
+      const sndMap: Partial<Record<BettingAction, SoundName>> = {
+        FOLD: 'fold', CHECK: 'check', CALL: 'call', RAISE: 'raise', ALL_IN: 'all_in',
+      }
+      const snd = sndMap[action]
+      if (snd) soundManager.play(snd)
+    }
     socketRef.current?.emit('player_action', {
       tableId: initialState.tableId,
       action,
@@ -934,6 +1295,67 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     setShowTipModal(false)
   }
 
+  function toggleChat() {
+    setChatOpen(o => {
+      const next = !o
+      if (next) setUnreadChatCount(0)
+      return next
+    })
+  }
+
+  function sendChatMessage() {
+    const trimmed = chatInput.trim()
+    if (trimmed.length === 0 || trimmed.length > CHAT_MAX_LEN) return
+    socketRef.current?.emit('table_chat_send', { tableId: initialState.tableId, message: trimmed })
+    setChatInput('')
+  }
+
+  function handleFullscreen() {
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
+    if (isIOS) {
+      // Toggle theater mode immediately for a visual improvement
+      setTheaterMode(m => !m)
+      // If already installed as a PWA (standalone), no need to show install tip
+      const isStandalone = window.matchMedia('(display-mode: standalone)').matches
+      if (!isStandalone && !theaterMode) {
+        setShowIosInstructions(true)
+      }
+      return
+    }
+
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element
+      webkitExitFullscreen?: () => void
+    }
+    const el = document.documentElement as HTMLElement & {
+      webkitRequestFullscreen?: () => void
+    }
+    const supported = !!(el.requestFullscreen || el.webkitRequestFullscreen)
+    if (!supported) {
+      // Fallback to theater mode on any unsupported browser
+      setTheaterMode(m => !m)
+      return
+    }
+    if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+      let req: Promise<void>
+      if (el.requestFullscreen) {
+        req = el.requestFullscreen()
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen()
+        req = Promise.resolve()
+      } else {
+        req = Promise.resolve()
+      }
+      req.catch(() => setTheaterMode(m => !m))
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {})
+      } else if (doc.webkitExitFullscreen) {
+        doc.webkitExitFullscreen()
+      }
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Phase labels
   // ─────────────────────────────────────────────────────────────────────────────
@@ -950,10 +1372,118 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   // ─────────────────────────────────────────────────────────────────────────────
 
   // Whether it's currently my turn and I need to act (no pending pre-action blocking)
-  const needsMyAction = myStatus === 'seated' && isMyTurn && myHP?.playerPhase === 'active' && preAction === null
+  const needsMyAction = myCurrentStatus === 'seated' && isMyTurn && myHP?.playerPhase === 'active' && preAction === null
+  // Whether the bottom panel is showing only the pre-action buttons (no status text below) —
+  // used to shrink the panel so it doesn't waste vertical space while waiting.
+  const preActionOnly = myStatus === 'seated' && !!hand && !isMyTurn && myHP?.playerPhase === 'active'
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden" style={{ background: '#060b15', minWidth: 580 }}>
+    <div className={`flex flex-col overflow-hidden${theaterMode ? ' tbl-theater' : ''}`} style={{
+      background: '#060b15',
+      height: '100dvh',
+      minHeight: '100dvh',
+      // env(safe-area-inset-top) is non-zero in iOS standalone (black-translucent status bar)
+      paddingTop: 'env(safe-area-inset-top)',
+      paddingLeft: 'env(safe-area-inset-left)',
+      paddingRight: 'env(safe-area-inset-right)',
+      // Bottom safe area is handled by the action panel itself so its background
+      // extends to the screen edge while its content stays above the home indicator
+    }}>
+
+      {/* ── Portrait lock ───────────────────────────────────────────────────── */}
+      <div className="portrait-lock" aria-hidden="true">
+        <div style={{ fontSize: 56, lineHeight: 1, userSelect: 'none', animation: 'portrait-rock 1.4s ease-in-out infinite' }}>📱</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <p style={{ color: '#f1f5f9', fontWeight: 700, fontSize: 18, letterSpacing: '-0.3px', margin: 0 }}>
+            Rotate your phone to landscape to play
+          </p>
+          <p style={{ color: '#475569', fontSize: 13, lineHeight: 1.4, margin: 0 }}>
+            This game requires landscape orientation
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 5, opacity: 0.2, marginTop: 4 }}>
+          {[0,1,2,3,4].map(i => (
+            <div key={i} style={{ width: 20, height: 28, borderRadius: 3, background: 'rgba(201,168,76,0.8)', border: '1px solid rgba(201,168,76,0.4)' }} />
+          ))}
+        </div>
+      </div>
+
+      {/* ── iOS "Add to Home Screen" instructions modal ─────────────────────── */}
+      {showIosInstructions && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 2000,
+            background: 'rgba(0,0,0,0.72)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '20px env(safe-area-inset-left, 20px)',
+          }}
+          onClick={() => setShowIosInstructions(false)}
+        >
+          <div
+            style={{
+              background: 'linear-gradient(145deg,#0e1c30,#0a1520)',
+              border: '1px solid rgba(201,168,76,0.35)',
+              borderRadius: 16, padding: '20px 22px',
+              maxWidth: 320, width: '100%',
+              boxShadow: '0 16px 48px rgba(0,0,0,0.8), 0 0 0 1px rgba(201,168,76,0.08)',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <span style={{ color: '#fde68a', fontWeight: 800, fontSize: 15 }}>Full Screen on iPhone</span>
+              <button
+                onClick={() => setShowIosInstructions(false)}
+                style={{ background: 'none', border: 'none', color: '#475569', fontSize: 20, cursor: 'pointer', lineHeight: 1, padding: '0 2px' }}
+              >✕</button>
+            </div>
+
+            <p style={{ color: '#94a3b8', fontSize: 12, marginBottom: 16, lineHeight: 1.6, margin: '0 0 16px' }}>
+              iPhone Safari doesn&apos;t support true fullscreen for websites.
+              For a native app experience, add Poker to your Home Screen:
+            </p>
+
+            {/* Steps */}
+            {[
+              { icon: '⬆️', step: 'Tap the Share button', sub: 'at the bottom of Safari' },
+              { icon: '➕', step: 'Tap "Add to Home Screen"', sub: 'scroll down if you don\'t see it' },
+              { icon: '🃏', step: 'Open Poker from your Home Screen', sub: 'it will launch in full screen' },
+            ].map((s, i) => (
+              <div key={i} style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: 12 }}>
+                <span style={{ fontSize: 22, flexShrink: 0, lineHeight: 1, marginTop: 1 }}>{s.icon}</span>
+                <div>
+                  <div style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 600, lineHeight: 1.3 }}>{s.step}</div>
+                  <div style={{ color: '#475569', fontSize: 11, marginTop: 2 }}>{s.sub}</div>
+                </div>
+              </div>
+            ))}
+
+            {/* Theater mode note */}
+            <div style={{
+              marginTop: 16, padding: '8px 12px',
+              background: 'rgba(201,168,76,0.07)', border: '1px solid rgba(201,168,76,0.2)',
+              borderRadius: 8,
+            }}>
+              <p style={{ color: '#fbbf24', fontSize: 11, margin: 0, lineHeight: 1.5 }}>
+                ✓ Theater mode is active — the header is now hidden to maximise screen space.
+              </p>
+            </div>
+
+            <button
+              onClick={() => setShowIosInstructions(false)}
+              style={{
+                marginTop: 14, width: '100%',
+                background: 'rgba(201,168,76,0.12)', border: '1px solid rgba(201,168,76,0.3)',
+                borderRadius: 8, padding: '10px 0',
+                color: '#e8c97a', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+                letterSpacing: '0.3px',
+              }}
+            >
+              Got it
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Kicked toast ────────────────────────────────────────────────────── */}
       {kickedMsg && (
@@ -970,6 +1500,22 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             <div style={{ color: '#fca5a5', fontWeight: 700, fontSize: 15, marginBottom: 6 }}>{kickedMsg}</div>
             <div style={{ color: '#6b7280', fontSize: 12 }}>Redirecting to lobby…</div>
           </div>
+        </div>
+      )}
+
+      {/* ── Out of chips toast ─────────────────────────────────────────────── */}
+      {outOfChipsMsg && (
+        <div style={{
+          position: 'fixed', top: 52, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 500, background: '#1c0f00', border: '1px solid rgba(234,179,8,0.4)',
+          borderRadius: 8, padding: '8px 16px',
+          display: 'flex', alignItems: 'center', gap: 10,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+        }}>
+          <span style={{ color: '#fde68a', fontSize: 13, fontWeight: 600 }}>
+            ⚠️ You ran out of chips and moved to spectator mode.
+          </span>
+          <button onClick={() => setOutOfChipsMsg(false)} style={{ background: 'transparent', border: 'none', color: '#fde68a', fontSize: 14, cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}>✕</button>
         </div>
       )}
 
@@ -991,7 +1537,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       )}
 
       {/* ══════════════════════════════════════════════════ TOP BAR ══════ */}
-      <header style={{
+      <header className="tbl-header" style={{
         height: 44, flexShrink: 0, background: '#0a1020',
         borderBottom: '1px solid #1a2540',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1014,6 +1560,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           {prevHandResult && (
             <button
               onClick={() => setShowPrevHand(p => !p)}
+              className="tbl-hide-mobile"
               style={{
                 background: showPrevHand ? 'rgba(59,130,246,0.18)' : 'rgba(255,255,255,0.05)',
                 border: `1px solid ${showPrevHand ? 'rgba(59,130,246,0.45)' : 'rgba(255,255,255,0.1)'}`,
@@ -1027,20 +1574,20 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-          <span style={{ color: '#475569', fontSize: 12 }}>{state.smallBlind}/{state.bigBlind}</span>
-          {myStatus === 'seated' && mySeatNumber != null && (
-            <span style={{ color: '#475569', fontSize: 12 }}>
+          <span className="tbl-hide-mobile" style={{ color: '#475569', fontSize: 12 }}>{state.smallBlind}/{state.bigBlind}</span>
+          {myCurrentStatus === 'seated' && mySeatNumber != null && (
+            <span className="tbl-hide-mobile" style={{ color: '#475569', fontSize: 12 }}>
               Seat <span style={{ color: '#cbd5e1' }}>{mySeatNumber}</span>
             </span>
           )}
           {/* Session badge */}
           {sessionInfo && (
             sessionExpired ? (
-              <span style={{ background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: 5, padding: '2px 8px', color: '#6ee7b7', fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap' }}>
+              <span className="tbl-hide-mobile" style={{ background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: 5, padding: '2px 8px', color: '#6ee7b7', fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap' }}>
                 Session ended — free to leave
               </span>
             ) : (
-              <span title="Session time remaining" style={{
+              <span className="tbl-hide-mobile" title="Session time remaining" style={{
                 background: sessionDisplay < 300 ? 'rgba(239,68,68,0.12)' : 'rgba(201,168,76,0.1)',
                 border: `1px solid ${sessionDisplay < 300 ? 'rgba(239,68,68,0.3)' : 'rgba(201,168,76,0.25)'}`,
                 borderRadius: 5, padding: '2px 8px',
@@ -1051,6 +1598,52 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               </span>
             )
           )}
+          <button
+            onClick={toggleChat}
+            title={chatOpen ? 'Hide chat' : 'Show chat'}
+            style={{
+              position: 'relative',
+              background: chatOpen ? 'rgba(201,168,76,0.18)' : 'transparent',
+              border: `1px solid ${chatOpen ? 'rgba(201,168,76,0.45)' : 'rgba(255,255,255,0.1)'}`,
+              borderRadius: 5, padding: '2px 8px', color: chatOpen ? '#e8c97a' : '#6b7280',
+              fontSize: 13, cursor: 'pointer',
+            }}
+          >
+            💬
+            {unreadChatCount > 0 && !chatOpen && (
+              <span style={{
+                position: 'absolute', top: -5, right: -5,
+                background: '#dc2626', color: 'white', fontSize: 9, fontWeight: 700,
+                borderRadius: 8, minWidth: 14, height: 14, padding: '0 3px',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1,
+              }}>
+                {unreadChatCount > 9 ? '9+' : unreadChatCount}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => { setMuted(m => !m); soundManager.unlock() }}
+            title={muted ? 'Unmute sounds' : 'Mute sounds'}
+            style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5, padding: '2px 8px', color: '#6b7280', fontSize: 13, cursor: 'pointer' }}
+          >
+            {muted ? '🔇' : '🔊'}
+          </button>
+          {/* Fullscreen / theater mode toggle */}
+          <button
+            onClick={handleFullscreen}
+            title={(isFullscreen || theaterMode) ? 'Exit Fullscreen' : 'Fullscreen'}
+            style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5, padding: '2px 7px', color: '#6b7280', fontSize: 12, cursor: 'pointer', lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            {(isFullscreen || theaterMode) ? (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M8 3v3a2 2 0 01-2 2H3M21 8h-3a2 2 0 01-2-2V3M3 16h3a2 2 0 012 2v3M16 21v-3a2 2 0 012-2h3"/>
+              </svg>
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M8 3H5a2 2 0 00-2 2v3M21 8V5a2 2 0 00-2-2h-3M3 16v3a2 2 0 002 2h3M16 21h3a2 2 0 002-2v-3"/>
+              </svg>
+            )}
+          </button>
           <button
             onClick={canLeave ? handleLeave : () => setSocketError('Session in progress — you cannot leave until the session ends.')}
             disabled={leaving}
@@ -1097,7 +1690,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           {prevHandResult.pots[0] && (
             <div style={{ marginBottom: 7, fontSize: 10 }}>
               <span style={{ color: '#475569' }}>Pot </span>
-              <span style={{ color: '#e8c97a', fontWeight: 700 }}>{prevHandResult.pots[0].amount.toLocaleString()}</span>
+              <span style={{ color: '#e8c97a', fontWeight: 700 }}>{formatNumber(prevHandResult.pots[0].amount)}</span>
               <span style={{ color: '#475569' }}> · </span>
               <span style={{ color: '#93c5fd' }}>{prevHandResult.pots[0].winnerHandName}</span>
             </div>
@@ -1119,7 +1712,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                 )}
                 <div style={{ flex: 1 }} />
                 <span style={{ color: p.netChipChange > 0 ? '#4ade80' : p.netChipChange < 0 ? '#f87171' : '#6b7280', fontWeight: 700, flexShrink: 0 }}>
-                  {p.netChipChange > 0 ? '+' : ''}{p.netChipChange.toLocaleString()}
+                  {p.netChipChange > 0 ? '+' : ''}{formatNumber(p.netChipChange)}
                 </span>
               </div>
             ))}
@@ -1134,17 +1727,107 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         </div>
       )}
 
+      {/* ── Table chat — fixed floating panel, collapsible via header button ─ */}
+      {chatOpen && (
+        <div className="tbl-chat-panel" style={{
+          position: 'fixed', top: 52, right: 12, bottom: 100, zIndex: 550,
+          width: 260, display: 'flex', flexDirection: 'column',
+          background: 'linear-gradient(145deg, #0d1929, #080f1d)',
+          border: '1px solid rgba(201,168,76,0.28)',
+          borderRadius: 10,
+          boxShadow: '0 8px 30px rgba(0,0,0,0.75)',
+          overflow: 'hidden',
+          pointerEvents: 'auto',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.08)', flexShrink: 0,
+          }}>
+            <span style={{ color: '#fde68a', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+              Table Chat
+            </span>
+            <button onClick={toggleChat}
+              style={{ background: 'transparent', border: 'none', color: '#475569', fontSize: 15, cursor: 'pointer', lineHeight: 1, padding: 0 }}>✕</button>
+          </div>
+          <div ref={chatScrollRef} className="tbl-chat-messages" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {chatMessages.length === 0 ? (
+              <span style={{ color: '#475569', fontSize: 11, fontStyle: 'italic' }}>No messages yet — say hi!</span>
+            ) : (
+              chatMessages.map((m, i) => (
+                <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
+                    <span style={{
+                      color: m.playerId === currentUserId ? '#93c5fd' : '#e8c97a', fontWeight: 700, fontSize: 10.5,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 140,
+                    }}>
+                      {m.playerId === currentUserId ? 'You' : m.username}
+                    </span>
+                    <span style={{ color: '#475569', fontSize: 9 }}>
+                      {new Date(m.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                  <span style={{ color: '#cbd5e1', fontSize: 11.5, wordBreak: 'break-word', lineHeight: 1.3 }}>{m.message}</span>
+                </div>
+              ))
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 5, padding: '8px 10px', borderTop: '1px solid rgba(255,255,255,0.08)', flexShrink: 0 }}>
+            <input
+              type="text"
+              value={chatInput}
+              onChange={e => setChatInput(e.target.value.slice(0, CHAT_MAX_LEN))}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); sendChatMessage() } }}
+              placeholder="Type a message…"
+              maxLength={CHAT_MAX_LEN}
+              style={{
+                flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 6, padding: '5px 8px', color: '#e2e8f0', fontSize: 11.5, outline: 'none',
+              }}
+            />
+            <button
+              onClick={sendChatMessage}
+              disabled={chatInput.trim().length === 0 || chatInput.trim().length > CHAT_MAX_LEN}
+              style={{
+                background: chatInput.trim().length === 0 ? 'rgba(255,255,255,0.05)' : 'rgba(201,168,76,0.18)',
+                border: '1px solid rgba(201,168,76,0.35)', borderRadius: 6, padding: '5px 10px',
+                color: chatInput.trim().length === 0 ? '#475569' : '#e8c97a', fontSize: 11, fontWeight: 700,
+                cursor: chatInput.trim().length === 0 ? 'not-allowed' : 'pointer', flexShrink: 0,
+              }}
+            >
+              Send
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ══════════════════════════════════════ TABLE AREA + ACTION PANEL ══ */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+      <div className="tbl-flex-area" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
 
         {/* ═══════════════════════════════════════════════ TABLE ════════ */}
-        <div style={{
-          flex: 1, minHeight: 0, display: 'flex',
-          alignItems: 'center', justifyContent: 'center',
-          padding: '8px 12px 4px', overflow: 'hidden',
+        {/* Table wrap: absolutely fills its flex slot so tbl-table-inner can use max-height: 100% */}
+        <div className="tbl-table-wrap" style={{
+          flex: 1, minHeight: 0,
+          position: 'relative',
+          overflow: 'hidden',
         }}>
-          <div style={{ width: '100%', maxWidth: 900, position: 'relative' }}>
-            <div style={{ paddingBottom: '58%', position: 'relative' }}>
+          <div className="tbl-table-maxw" style={{
+            position: 'absolute',
+            inset: '10px 24px 8px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}>
+            {/* aspect-ratio + max-height: 100% keeps the oval inside available space on every screen size */}
+            <div className="tbl-table-inner" data-seatcount={max} style={{
+              width: '100%',
+              maxWidth: 770,
+              aspectRatio: '1.72',
+              maxHeight: '100%',
+              position: 'relative',
+              // Consumed by mobile-landscape seat/chip CSS to scale pod density down as
+              // the table gets fuller (so a 9-max table still fits a phone screen).
+              ...({ '--mscale': mobileDensityScale(max) } as React.CSSProperties),
+            }}>
 
               {/* Ambient glow */}
               <div style={{
@@ -1188,7 +1871,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
               {/* Center: Pot + Community Cards */}
               <div style={{
-                position: 'absolute', inset: 0,
+                position: 'absolute', top: 0, left: 0, right: 0, bottom: '8%',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 pointerEvents: 'none',
               }}>
@@ -1198,37 +1881,33 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
                   {hand && (
                     <>
-                      <div style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
+                      <div className="tbl-pot-pill" style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
                         background: 'rgba(0,0,0,0.72)', border: '1px solid rgba(201,168,76,0.3)',
-                        borderRadius: 24, padding: '6px 18px',
+                        borderRadius: 14, padding: '3px 12px',
                         backdropFilter: 'blur(6px)',
+                        transform: 'translateY(16px)'
                       }}>
-                        <span style={{ fontSize: 15 }}>🪙</span>
-                        <div>
-                          <div style={{ fontSize: 9, letterSpacing: '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.45)' }}>
-                            Main Pot
-                          </div>
-                          <div style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 17, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.5px' }}>
-                            {hand.pot.toLocaleString()}
-                          </div>
+                        <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.1em', color: 'rgba(245,236,215,0.45)' }}>
+                          POT
+                        </span>
+                        <div className="tbl-pot-amount" style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 12, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.5px' }}>
+                          {formatNumber(hand.pot)}
                         </div>
-                        {hand.currentBet > 0 && (
-                          <span style={{ color: 'rgba(245,236,215,0.35)', fontSize: 10, alignSelf: 'flex-end', marginBottom: 2 }}>
-                            bet {hand.currentBet.toLocaleString()}
-                          </span>
-                        )}
                       </div>
 
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        {hand.communityCards.map((c, i) => (
-                          <PlayingCard key={i} c={c} size="community" />
+                      <div className="tbl-community-row" style={{ display: 'flex', gap: 6 }}>
+                        {hand.communityCards.slice(0, visibleCommunityCount).map((c, i) => (
+                          <div key={`card-${i}`} style={{ animation: 'card-deal-in 0.28s ease-out' }}>
+                            <PlayingCard c={c} size="community" />
+                          </div>
                         ))}
-                        {Array.from({ length: 5 - hand.communityCards.length }).map((_, i) => (
-                          <div key={i} style={{
+                        {Array.from({ length: 5 - visibleCommunityCount }).map((_, i) => (
+                          <div key={`empty-${visibleCommunityCount + i}`} style={{
                             width: CARD_DIMS.community.w, height: CARD_DIMS.community.h,
                             borderRadius: CARD_DIMS.community.r,
-                            border: '1px dashed rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.2)',
+                            border: '1.5px dashed rgba(255,255,255,0.22)', background: 'rgba(255,255,255,0.04)',
+                            boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
                           }} />
                         ))}
                       </div>
@@ -1261,7 +1940,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               </div>
 
               {/* ── Seats + chip bets ─────────────────────────────────────── */}
-              {state.seats.map(seat => {
+              {(layoutPreview ? layoutPreview.seats : state.seats).map(seat => {
                 const vs       = toVisual(seat.seatNumber, anchor, max)
                 const isMe     = seat.playerId === currentUserId
                 const occ      = seat.playerId !== null
@@ -1278,14 +1957,18 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                   (showdownResult.pots[0]?.winners ?? []).includes(seat.playerId)
                 const showTmr  = isTurn && turnTimerInfo?.playerId === seat.playerId && timeLeft > 0
                 const lastAct  = seat.playerId ? lastActions[seat.playerId] : null
-                const avatar   = getAvatar(seat.avatarId ?? fallbackAvatarId(seat.username))
                 const dimmed   = folded || sdFolded
+
+                // Fixed mobile-landscape preset class — pins the pod by its
+                // rail-side edge and orders its content (avatar/cards/pill)
+                // so nothing overlaps or bleeds off a phone screen.
+                const podClass = mobileAnchorClass(vs, max)
 
                 return (
                   <div key={seat.seatNumber}>
-                    {/* Chip bet stack — with SB/BB label during PRE_FLOP */}
-                    {occ && hp && hp.roundContribution > 0 && (
-                      <div style={{ ...chipPos(vs, max), position: 'absolute', zIndex: 10, pointerEvents: 'none' }}>
+                    {/* Chip bet stack — hero bet is shown in the pod, opponents use floating chipPos */}
+                    {occ && hp && hp.roundContribution > 0 && vs !== 1 && (
+                      <div className="tbl-bet-chip" style={{ ...chipPos(vs, max), ...mobileChipVars(vs, max), position: 'absolute', zIndex: 10, pointerEvents: 'none' }}>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
                           {showBlindLabels && isSB && (
                             <span style={{ background: '#1d4ed8', color: 'white', fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, letterSpacing: '0.04em' }}>SB</span>
@@ -1298,11 +1981,17 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                       </div>
                     )}
 
-                    {/* Seat pod — circular avatar design */}
-                    <div style={seatPos(vs, max)}>
+                    {/* Seat pod */}
+                    <div
+  className={`tbl-seat-pod ${podClass} ${mobileAnchorClass(vs, max)}`}
+  style={{
+    ...seatPos(vs, max),
+    ...mobileSeatVars(vs, max),
+  }}
+>
                       {!occ ? (
                         /* Empty seat */
-                        <div style={{
+                        <div className="tbl-empty-seat" style={{
                           width: 52, height: 52, borderRadius: '50%',
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
                           border: '1px dashed rgba(255,255,255,0.12)',
@@ -1312,18 +2001,16 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         </div>
                       ) : (() => {
                         /* Occupied seat — v3 side-cards design */
-                        const rad2 = ((180 - (vs - 1) * (360 / max)) * Math.PI) / 180
-                        const seatXPct = 50 + 46 * Math.sin(rad2)
                         const isHero = vs === 1
-                        const isRightSide = seatXPct > 55 && !isHero
 
-                        // Cards shown beside avatar (non-hero) or above (hero)
+                        // Cards shown beside player (non-hero) or above (hero)
                         const runoutCards = seat.playerId ? runoutRevealedCards[seat.playerId] : undefined
                         const shownCards  = seat.playerId ? revealedCards[seat.playerId] : undefined
 
+                        const heroIsLive = isHero && hand !== null && !folded && isMe && effectiveHoleCards !== null
                         const heroCards: [Card, Card] | null = isHero
-                          ? (hand && !folded && isMe && myHoleCards
-                              ? myHoleCards
+                          ? (heroIsLive
+                              ? effectiveHoleCards
                               : (!hand && sdP?.holeCards)
                               ? (sdP.holeCards as [Card, Card])
                               : (!hand && shownCards)
@@ -1331,28 +2018,32 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                               : null)
                           : null
 
+                        // Opponent cards shrink to "xs" once 7+ seats are in play — the table
+                        // gets a lot more crowded per seat at that point, on every screen size.
+                        const oppCardSize: CardSize = max <= 6 ? 'sm' : 'xs'
+
                         const sideCardNode = !isHero ? (
                           hand && !folded && hp ? (
-                            isMe && myHoleCards ? (
-                              <div style={{ display: 'flex', gap: 2 }}>
-                                <PlayingCard c={myHoleCards[0]} size="sm" />
-                                <PlayingCard c={myHoleCards[1]} size="sm" />
+                            isMe && effectiveHoleCards ? (
+                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2 }}>
+                                <PlayingCard c={effectiveHoleCards[0]} size={oppCardSize} />
+                                <PlayingCard c={effectiveHoleCards[1]} size={oppCardSize} />
                               </div>
                             ) : !isMe && runoutCards ? (
-                              <div style={{ display: 'flex', gap: 2 }}>
-                                <PlayingCard c={runoutCards[0]} size="sm" />
-                                <PlayingCard c={runoutCards[1]} size="sm" />
+                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2 }}>
+                                <PlayingCard c={runoutCards[0]} size={oppCardSize} />
+                                <PlayingCard c={runoutCards[1]} size={oppCardSize} />
                               </div>
-                            ) : !isMe ? (
-                              <div style={{ display: 'flex', gap: 2 }}>
-                                <CardBack size="sm" />
-                                <CardBack size="sm" />
+                            ) : !isMe && effectiveDealtSeats.has(seat.seatNumber) ? (
+                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2, animation: 'card-deal-in 0.3s ease-out' }}>
+                                <CardBack size={oppCardSize} />
+                                <CardBack size={oppCardSize} />
                               </div>
                             ) : null
                           ) : (!hand && (sdP?.holeCards || shownCards) && !isMe) ? (
-                            <div style={{ display: 'flex', gap: 2 }}>
-                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[0]} size="sm" />
-                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[1]} size="sm" />
+                            <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2 }}>
+                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[0]} size={oppCardSize} />
+                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[1]} size={oppCardSize} />
                             </div>
                           ) : null
                         ) : null
@@ -1369,61 +2060,348 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         let displayName = seat.username ?? ''
                         if (showBlindLabels && isSB) displayName += ' · SB'
                         if (showBlindLabels && isBB) displayName += ' · BB'
-                        const stackDisplay = hp ? hp.stack.toLocaleString() : sdP ? sdP.finalStack.toLocaleString() : '—'
+                        const stackDisplay = hp ? formatNumber(hp.stack) : sdP ? formatNumber(sdP.finalStack) : '—'
 
-                        return (
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-
-                            {/* Hero hole cards — above avatar row */}
-                            {heroCards && (
-                              <div style={{ display: 'flex', gap: 4, marginBottom: 2 }}>
-                                <PlayingCard c={heroCards[0]} size="sm" />
-                                <PlayingCard c={heroCards[1]} size="sm" />
+                        // Shared avatar circle
+                        const avatarCircle = (
+                          <div style={{ position: 'relative', flexShrink: 0 }}>
+                            <div className={isHero ? 'tbl-player-circle-hero' : 'tbl-player-circle'} style={{
+                              width: isHero ? 48 : 42, height: isHero ? 48 : 42,
+                              borderRadius: '50%',
+                              background: isMe
+                                ? 'radial-gradient(circle at 38% 35%, #1e3a5f, #0f2040)'
+                                : 'radial-gradient(circle at 38% 35%, #1e2a3a, #0f1824)',
+                              border: isTurn
+                                ? '2px solid #c9a84c'
+                                : isWinner
+                                ? '2px solid rgba(201,168,76,0.7)'
+                                : isMe
+                                ? '2px solid rgba(201,168,76,0.4)'
+                                : '2px solid rgba(255,255,255,0.12)',
+                              boxShadow: isTurn
+                                ? '0 0 0 3px rgba(201,168,76,0.2),0 0 14px rgba(201,168,76,0.4)'
+                                : isWinner
+                                ? '0 0 12px rgba(201,168,76,0.3)'
+                                : 'none',
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: isHero ? 18 : 15, fontWeight: 700, lineHeight: 1,
+                              color: isMe ? '#e8c97a' : '#64748b',
+                              letterSpacing: '-0.5px',
+                              opacity: dimmed ? 0.3 : 1, transition: 'opacity 0.2s',
+                              overflow: 'hidden', position: 'relative',
+                            }}>
+                              <span style={{ position: 'relative', zIndex: 1 }}>
+                                {(seat.username ?? '?').charAt(0).toUpperCase()}
+                              </span>
+                            </div>
+                            {isD && (
+                              <div style={{ position: 'absolute', bottom: -2, right: -3, zIndex: 5 }}>
+                                <DealerButton />
                               </div>
                             )}
+                          </div>
+                        )
 
-                            {/* Avatar row */}
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexDirection: isRightSide ? 'row-reverse' : 'row' }}>
-
-                              {/* Avatar circle */}
-                              <div style={{ position: 'relative', flexShrink: 0 }}>
-                                <div style={{
-                                  width: isHero ? 48 : 42, height: isHero ? 48 : 42,
-                                  borderRadius: '50%',
-                                  background: `radial-gradient(circle at 38% 35%, ${avatar.color}ee, ${avatar.color}99)`,
-                                  border: isTurn
-                                    ? '2px solid #c9a84c'
-                                    : isWinner
-                                    ? '2px solid rgba(201,168,76,0.7)'
-                                    : isMe
-                                    ? '2px solid rgba(201,168,76,0.4)'
-                                    : '2px solid rgba(201,168,76,0.18)',
-                                  boxShadow: isTurn
-                                    ? '0 0 0 3px rgba(201,168,76,0.2),0 0 14px rgba(201,168,76,0.4)'
-                                    : isWinner
-                                    ? '0 0 12px rgba(201,168,76,0.3)'
-                                    : 'none',
-                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                  fontSize: isHero ? 22 : 18, lineHeight: 1,
-                                  opacity: dimmed ? 0.3 : 1, transition: 'opacity 0.2s',
-                                  overflow: 'hidden', position: 'relative',
-                                }}>
-                                  {showTmr && !isHero && <TimerRing t={timeLeft} />}
-                                  <span style={{ position: 'relative', zIndex: 1 }}>{avatar.emoji}</span>
-                                </div>
-                                {isD && (
-                                  <div style={{ position: 'absolute', bottom: -2, right: -3, zIndex: 5 }}>
-                                    <DealerButton />
-                                  </div>
-                                )}
+                        // Shared seat pill
+                        const seatPill = (
+                          <div className="tbl-seat-pill" style={{
+                            background: 'rgba(54, 51, 51, 0.5)',
+                            border: `1px solid ${isTurn ? 'rgba(201,168,76,0.35)' : 'rgba(255,255,255,0.07)'}`,
+                            borderRadius: 8, padding: '3px 10px', textAlign: 'center', minWidth: 72,
+                            backdropFilter: 'blur(4px)',
+                            boxShadow: isTurn ? '0 0 10px rgba(201,168,76,0.15)' : 'none',
+                            opacity: dimmed ? 0.45 : 1, transition: 'opacity 0.2s',
+                            transform: 'translate(-10px, -3px)',
+                          }}>
+                            <div className="tbl-seat-pill-name" style={{ fontSize: 9, letterSpacing: '1.2px', textTransform: 'uppercase', color: isMe ? '#c9a84c' : 'rgba(245,236,215,0.5)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
+                              {displayName}
+                            </div>
+                            <div className="tbl-seat-pill-stack" style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 12, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.3px' }}>
+                              {stackDisplay}
+                            </div>
+                            {pillAction && (
+                              <div className="tbl-seat-pill-action" style={{ fontSize: 8, letterSpacing: '0.8px', textTransform: 'uppercase', marginTop: 1, color: pillColor, fontWeight: 600 }}>
+                                {pillAction}
                               </div>
+                            )}
+                          </div>
+                        )
 
-                              {/* Side cards (non-hero) */}
-                              {sideCardNode}
+ if (isHero) {
+  // Hero: clean bottom row
+  // [ avatar + optional bet ]   [ hole cards ]   [ compact name / stack pill ]
+  return (
+    <div
+      className="tbl-hero-row"
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 14,
+        padding: '2px 8px',
+        pointerEvents: 'none',
+      }}
+    >
+      {/* Left: avatar circle only */}
+      <div
+        className="tbl-hero-avatar-col"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 1,
+          flexShrink: 0,
+        }}
+      >
+        {avatarCircle}
+      </div>
 
-                              {/* Timer beside avatar for hero */}
-                              {isHero && showTmr && (
-                                <div style={{ position: 'relative', width: 34, height: 34, marginLeft: 4, flexShrink: 0 }}>
+      {/* Middle: bet chip (if any) stacked just above the hero hole cards */}
+      <div
+        className="tbl-hero-cards-col"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 4,
+          flexShrink: 0,
+        }}
+      >
+        {hp && hp.roundContribution > 0 && (
+          <div
+            className="tbl-hero-bet-stack"
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 1,
+            }}
+          >
+            {showBlindLabels && isSB && (
+              <span
+                style={{
+                  background: '#1d4ed8',
+                  color: 'white',
+                  fontSize: 8,
+                  fontWeight: 800,
+                  padding: '1px 5px',
+                  borderRadius: 3,
+                  letterSpacing: '0.04em',
+                }}
+              >
+                SB
+              </span>
+            )}
+
+            {showBlindLabels && isBB && (
+              <span
+                style={{
+                  background: '#6d28d9',
+                  color: 'white',
+                  fontSize: 8,
+                  fontWeight: 800,
+                  padding: '1px 5px',
+                  borderRadius: 3,
+                  letterSpacing: '0.04em',
+                }}
+              >
+                BB
+              </span>
+            )}
+
+            <ChipStack amount={hp.roundContribution} />
+          </div>
+        )}
+
+        {heroCards && (!heroIsLive || visibleHoleCount >= 1) && (
+          <div
+            className="tbl-hero-cards"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              flexShrink: 0,
+            }}
+          >
+            {(!heroIsLive || visibleHoleCount >= 1) && (
+              <div
+                key="hc1"
+                style={{
+                  borderRadius: CARD_DIMS.md.r + 2,
+                  lineHeight: 0,
+                  flexShrink: 0,
+                  boxShadow: heroIsLive
+                    ? '0 0 0 1.5px rgba(201,168,76,0.65), 0 4px 16px rgba(0,0,0,0.75)'
+                    : '0 2px 10px rgba(0,0,0,0.6)',
+                  animation: heroIsLive ? 'card-deal-in 0.25s ease-out' : undefined,
+                }}
+              >
+                <PlayingCard c={heroCards[0]} size="md" />
+              </div>
+            )}
+
+            {(!heroIsLive || visibleHoleCount >= 2) && (
+              <div
+                key="hc2"
+                style={{
+                  borderRadius: CARD_DIMS.md.r + 2,
+                  lineHeight: 0,
+                  flexShrink: 0,
+                  boxShadow: heroIsLive
+                    ? '0 0 0 1.5px rgba(201,168,76,0.65), 0 4px 16px rgba(0,0,0,0.75)'
+                    : '0 2px 10px rgba(0,0,0,0.6)',
+                  animation: heroIsLive ? 'card-deal-in 0.25s ease-out' : undefined,
+                }}
+              >
+                <PlayingCard c={heroCards[1]} size="md" />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Right: timer + compact player info */}
+      <div
+        className="tbl-hero-info-col"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+          justifyContent: 'center',
+          gap: 4,
+          flexShrink: 0,
+        }}
+      >
+        {showTmr && (
+          <div style={{ position: 'relative', width: 28, height: 28, flexShrink: 0 }}>
+            <svg
+              viewBox="0 0 44 44"
+              fill="none"
+              style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}
+            >
+              <circle cx="22" cy="22" r="19" stroke="rgba(255,255,255,0.08)" strokeWidth="3.5" fill="none" />
+              <circle
+                cx="22"
+                cy="22"
+                r="19"
+                fill="none"
+                stroke={timeLeft <= 10 ? '#ef4444' : timeLeft <= 20 ? '#f59e0b' : '#c9a84c'}
+                strokeWidth="3.5"
+                strokeLinecap="round"
+                strokeDasharray={`${Math.max(0, (timeLeft / TIMER_TOTAL) * 119.4).toFixed(1)} 119.4`}
+              />
+            </svg>
+
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: '"JetBrains Mono",monospace',
+                  fontSize: 9,
+                  fontWeight: 700,
+                  color: '#f59e0b',
+                }}
+              >
+                {timeLeft}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div
+          className="tbl-seat-pill tbl-hero-pill"
+          style={{
+            background: 'rgba(41, 41, 41, 0.47)',
+            border: `1px solid ${isTurn ? 'rgba(201,168,76,0.45)' : 'rgba(255,255,255,0.08)'}`,
+            borderRadius: 7,
+            padding: '4px 9px',
+            textAlign: 'center',
+            minWidth: 92,
+            backdropFilter: 'blur(4px)',
+            boxShadow: isTurn
+              ? '0 0 10px rgba(201,168,76,0.18)'
+              : '0 3px 10px rgba(0,0,0,0.4)',
+            opacity: dimmed ? 0.45 : 1,
+            transition: 'opacity 0.2s',
+          }}
+        >
+          <div
+            className="tbl-seat-pill-name"
+            style={{
+              fontSize: 8,
+              letterSpacing: '0.9px',
+              textTransform: 'uppercase',
+              color: '#c9a84c',
+              fontWeight: 600,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              maxWidth: 90,
+            }}
+          >
+            {displayName}
+          </div>
+
+          <div
+            className="tbl-seat-pill-stack"
+            style={{
+              fontFamily: '"JetBrains Mono",monospace',
+              fontSize: 11,
+              fontWeight: 700,
+              color: '#e8c97a',
+              letterSpacing: '-0.3px',
+              lineHeight: 1.25,
+            }}
+          >
+            {stackDisplay}
+          </div>
+
+          {pillAction && (
+            <div
+              className="tbl-seat-pill-action"
+              style={{
+                fontSize: 7,
+                letterSpacing: '0.7px',
+                textTransform: 'uppercase',
+                marginTop: 1,
+                color: pillColor,
+                fontWeight: 700,
+              }}
+            >
+              {pillAction}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+                        return (
+                          <div className="tbl-opponent-seat" style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                            {avatarCircle}
+                            {sideCardNode}
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                              {showTmr && (
+                                <div
+  style={{
+    position: 'relative',
+    width: 24,
+    height: 24,
+    flexShrink: 0,
+  }}
+>
                                   <svg viewBox="0 0 44 44" fill="none" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
                                     <circle cx="22" cy="22" r="19" stroke="rgba(255,255,255,0.08)" strokeWidth="3.5" fill="none" />
                                     <circle cx="22" cy="22" r="19" fill="none"
@@ -1433,34 +2411,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                                     />
                                   </svg>
                                   <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                    <span style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 10, fontWeight: 700, color: '#f59e0b' }}>{timeLeft}</span>
+                                    <span style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 8, fontWeight: 700, color: '#f59e0b' }}>{timeLeft}</span>
                                   </div>
                                 </div>
                               )}
+                              {seatPill}
                             </div>
-
-                            {/* Seat pill */}
-                            <div style={{
-                              background: 'rgba(0,0,0,0.7)',
-                              border: `1px solid ${isTurn ? 'rgba(201,168,76,0.35)' : 'rgba(255,255,255,0.07)'}`,
-                              borderRadius: 8, padding: '3px 10px', textAlign: 'center', minWidth: 72,
-                              backdropFilter: 'blur(4px)',
-                              boxShadow: isTurn ? '0 0 10px rgba(201,168,76,0.15)' : 'none',
-                              opacity: dimmed ? 0.45 : 1, transition: 'opacity 0.2s',
-                            }}>
-                              <div style={{ fontSize: 9, letterSpacing: '1.2px', textTransform: 'uppercase', color: isMe ? '#c9a84c' : 'rgba(245,236,215,0.5)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
-                                {displayName}
-                              </div>
-                              <div style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 12, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.3px' }}>
-                                {stackDisplay}
-                              </div>
-                              {pillAction && (
-                                <div style={{ fontSize: 8, letterSpacing: '0.8px', textTransform: 'uppercase', marginTop: 1, color: pillColor, fontWeight: 600 }}>
-                                  {pillAction}
-                                </div>
-                              )}
-                            </div>
-
                           </div>
                         )
                       })()}
@@ -1473,9 +2429,33 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           </div>
         </div>
 
+        {/* ── Mobile hero cards strip: shown above action bar on small landscape screens ── */}
+        {myHoleCards && (
+          <div className="tbl-mobile-hero" style={{
+            display: 'none',
+            flexShrink: 0,
+            justifyContent: 'center',
+            alignItems: 'center',
+            gap: 8,
+            padding: '4px 0 2px',
+          }}>
+            {visibleHoleCount >= 1 && (
+              <div style={{ lineHeight: 0, borderRadius: CARD_DIMS.sm.r + 2, boxShadow: '0 0 0 1.5px rgba(201,168,76,0.65), 0 4px 16px rgba(0,0,0,0.75)' }}>
+                <PlayingCard c={myHoleCards[0]} size="sm" />
+              </div>
+            )}
+            {visibleHoleCount >= 2 && (
+              <div style={{ lineHeight: 0, borderRadius: CARD_DIMS.sm.r + 2, boxShadow: '0 0 0 1.5px rgba(201,168,76,0.65), 0 4px 16px rgba(0,0,0,0.75)' }}>
+                <PlayingCard c={myHoleCards[1]} size="sm" />
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ════════════════════════════════════════ BOTTOM ACTION PANEL ══ */}
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
+          @keyframes card-deal-in{from{opacity:0;transform:translateY(-16px) scale(0.84) rotate(-5deg)}to{opacity:1;transform:translateY(0) scale(1) rotate(0deg)}}
           .ap-range{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;outline:none;cursor:pointer;}
           .ap-range::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
           .ap-range::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
@@ -1490,154 +2470,365 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           .ap-fold:hover{box-shadow:0 0 18px rgba(220,38,38,0.22);}
           .ap-check{background:linear-gradient(180deg,#18381a,#0d2410);border:1px solid rgba(34,197,94,0.28);color:#86efac;}
           .ap-check:hover{box-shadow:0 0 18px rgba(34,197,94,0.18);}
-          .ap-call{background:linear-gradient(180deg,#16243a,#0d1929);border:1px solid rgba(59,130,246,0.32);color:#93c5fd;}
-          .ap-call:hover{box-shadow:0 0 18px rgba(59,130,246,0.2);}
+          .ap-call{background:linear-gradient(180deg,#0e3320,#081d13);border:1px solid rgba(52,211,153,0.32);color:#34d399;}
+          .ap-call:hover{box-shadow:0 0 18px rgba(52,211,153,0.2);}
           .ap-raise{flex:1.35 !important;background:linear-gradient(180deg,#3a2508,#241600);border:1px solid rgba(201,168,76,0.42);color:#e8c97a;}
           .ap-raise:hover{box-shadow:0 0 22px rgba(201,168,76,0.28);}
-          .ap-allin{background:linear-gradient(180deg,#3a1e00,#241200);border:1px solid rgba(249,115,22,0.38);color:#fdba74;}
-          .ap-allin:hover{box-shadow:0 0 18px rgba(249,115,22,0.22);}
-        `}</style>
-        <div style={{ flexShrink: 0, background: '#07101f', borderTop: '1px solid #1a2540' }}>
-          <div style={{ display: 'flex', alignItems: 'stretch', minHeight: 116 }}>
+          .ap-allin{background:linear-gradient(180deg,#2e0f50,#1c0935);border:1px solid rgba(168,85,247,0.4);color:#c4b5fd;}
+          .ap-allin:hover{box-shadow:0 0 18px rgba(168,85,247,0.24);}
 
-            {/* ── Cards column ──────────────────────────────────────── */}
-            {myHoleCards && myStatus === 'seated' && (
-              <div style={{
-                flexShrink: 0, borderRight: '1px solid #1a2540',
-                padding: '8px 10px',
-                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
-              }}>
-                <span style={{ color: '#475569', fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
-                  Your Hand
-                </span>
-                <div style={{ display: 'flex', gap: 5 }}>
-                  <PlayingCard c={myHoleCards[0]} size="md" />
-                  <PlayingCard c={myHoleCards[1]} size="md" />
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {myHP && (
-                    <span style={{ color: '#fbbf24', fontSize: 11, fontWeight: 700, letterSpacing: '-0.3px' }}>
-                      {myHP.stack.toLocaleString()}
-                    </span>
-                  )}
-                  {showdownResult && myShowdownResult && (
-                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: '-0.3px', color: myShowdownResult.netChipChange > 0 ? '#4ade80' : '#f87171' }}>
-                      {myShowdownResult.netChipChange > 0 ? '+' : ''}{myShowdownResult.netChipChange.toLocaleString()}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
+          /* ── Hero seat cards — shown in seat pod by default ──────── */
+          .tbl-hero-cards{}
+          /* ── Mobile hero strip — hidden by default, shown on mobile ─ */
+          .tbl-mobile-hero{display:none;}
+          /* ── Showdown panel — capped so it never swallows the table ─ */
+          .tbl-showdown-panel{max-height:min(420px,70vh);overflow-y:auto;}
+
+          /* ── Compact bottom panel — pre-action buttons only, no status text ─ */
+          .tbl-panel-compact{min-height:60px!important;}
+          .tbl-panel-compact .tbl-main-col{padding-top:6px!important;padding-bottom:6px!important;}
+
+          /* ── Theater mode: header hidden, table fills viewport ────── */
+          /* The root div still has paddingTop:env(safe-area-inset-top) so   */
+          /* content stays below the iOS status bar even without the header. */
+          .tbl-theater .tbl-header{display:none!important;}
+
+          /* ── Portrait lock — all phones in portrait ────────────────── */
+          .portrait-lock{display:none;position:fixed;inset:0;z-index:9999;background:#060b15;flex-direction:column;align-items:center;justify-content:center;gap:24px;text-align:center;padding:32px;}
+          @media (max-width:767px) and (orientation:portrait){.portrait-lock{display:flex;}}
+          @keyframes portrait-rock{0%,100%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}}
+
+          /* ── Mobile landscape overrides (short viewport) ─────────── */
+          @media (max-height:500px) and (orientation:landscape){
+
+            /* Header */
+            .tbl-header{height:30px!important;padding:0 8px!important;}
+            .tbl-hide-mobile{display:none!important;}
+
+            /* Chat panel — smaller and tucked in the top-right so it stays clear of the table */
+            .tbl-chat-panel{width:190px!important;top:34px!important;bottom:64px!important;}
+            .tbl-chat-messages{font-size:10px!important;}
+
+            /* Table wrap: let absolute child fill it cleanly */
+            .tbl-table-wrap{overflow:hidden!important;}
+
+/* Mobile seat scale by table size */
+.tbl-table-inner[data-seatcount="2"],
+.tbl-table-inner[data-seatcount="3"],
+.tbl-table-inner[data-seatcount="4"]{ --mscale:0.70; }
+
+.tbl-table-inner[data-seatcount="5"],
+.tbl-table-inner[data-seatcount="6"]{ --mscale:0.62; }
+
+.tbl-table-inner[data-seatcount="7"],
+.tbl-table-inner[data-seatcount="8"],
+.tbl-table-inner[data-seatcount="9"]{ --mscale:0.54; }
+
+/* Community cards — scale down to save vertical space */
+.tbl-community-row{transform:scale(0.76);transform-origin:center;}
+
+            /* Pot pill — compact on small landscape screens */
+            .tbl-pot-pill{padding:2px 8px!important;gap:4px!important;}
+            .tbl-pot-amount{font-size:10px!important;}
+
+            /* Seat pods */
+            .tbl-player-circle{width:30px!important;height:30px!important;font-size:13px!important;}
+            .tbl-player-circle-hero{width:36px!important;height:36px!important;font-size:17px!important;}
+            .tbl-seat-pill{padding:1px 6px!important;min-width:48px!important;border-radius:5px!important;}
+            .tbl-seat-pill-name{font-size:6px!important;letter-spacing:0.4px!important;}
+            .tbl-seat-pill-stack{font-size:9px!important;}
+            .tbl-seat-pill-action{font-size:5.5px!important;margin-top:0!important;}
+
+            /* Empty seats — very subtle to reduce visual noise */
+            .tbl-empty-seat{opacity:0.25!important;width:36px!important;height:36px!important;font-size:8px!important;}
+
+            /* Hero seat: clean compact row above the action panel */
+            .tbl-hero-seat{
+              top:82%!important;
+              left:50%!important;
+              transform:translate(-50%,-50%) scale(0.95)!important;
+              z-index:30!important;
+            }
+
+            .tbl-hero-row{
+              gap:7px!important;
+              padding:0 4px!important;
+              align-items:center!important;
+            }
+
+            .tbl-hero-avatar-col{
+              gap:2px!important;
+               transform:translate(0px, 40px);
+            }
+
+            .tbl-hero-bet-stack{
+              transform:scale(0.95);
+              transform-origin:top center;
+              margin-top:-5px!important;
+            }
+
+            .tbl-hero-pill{
+              min-width:78px!important;
+              padding:3px 7px!important;
+            }
+
+            .tbl-hero-info-col{
+              align-items:flex-start!important;
+              /* Pull closer to the cards — avatar↔cards keeps the full row gap */
+              margin-left:-6px!important;
+              transform:translate(-1px, 20px);
+            }
+
+            /* Hero cards stay inside the hero row instead of a separate strip */
+            .tbl-hero-cards{
+              display:flex!important;
+              transform:scale(0.88);
+              transform-origin:center;
+            }
+
+            /* Duplicate separate card strip — hidden now that cards live in the hero row */
+            .tbl-mobile-hero{
+              display:none!important;
+            }
+
+            /* Opponent hole/back cards — full width in the stacked pod layout below */
+            .tbl-opponent-cards{
+              transform-origin:center;
+              justify-content:center;
+            }
+
+            /* Bet chips — scaled to match the pod density tier.          */
+            /* Target the inner child, not the wrapper: the wrapper's     */
+            /* position comes from mobileChipVars() below.                */
+            .tbl-bet-chip > div{
+              transform:scale(var(--mscale,0.55));
+              transform-origin:top center;
+            }
+
+            /* Showdown panel — smaller and capped so it can't cover seats or the action bar */
+            .tbl-showdown-panel{
+              max-height:58vh!important;
+              transform:scale(0.82);
+              transform-origin:center;
+              padding:6px 8px!important;
+            }
+
+            /* ── Fixed mobile-landscape seat presets (override oval math) ──────
+               Every opponent pod is centred horizontally on a hand-picked point
+               and stacks its content vertically (avatar / cards / pill) instead
+               of side-by-side — a vertical stack is far narrower, which is what
+               lets up to 8 opponents share a phone's limited width without
+               overlapping. "vtop" pods (near the top rail) anchor at their own
+               top edge and grow downward; "vmid" pods (down the side rails)
+               anchor at vertical centre. See MOBILE_SEAT_PRESETS for the
+               coordinates and mobileDensityScale() for --mscale. */
+            .tbl-pod-vtop, .tbl-pod-vmid{
+              left:var(--mleft)!important;
+              top:var(--mtop)!important;
+              transform:translate(-50%,var(--mty)) scale(var(--mscale,0.55))!important;
+            }
+            .tbl-pod-vtop{ transform-origin:50% 0%; }
+            .tbl-pod-vmid{ transform-origin:50% 50%; }
+            .tbl-pod-vtop .tbl-opponent-seat,
+            .tbl-pod-vmid .tbl-opponent-seat{
+              flex-direction:column!important;
+            }
+
+            /* Bet chips share the same fixed coordinates (interpolated toward the pot) */
+            .tbl-bet-chip{
+              left:var(--mleft)!important;
+              top:var(--mtop)!important;
+            }
+
+            /* Neutralise the desktop seat-pill nudge so pills line up with the new anchors */
+            .tbl-seat-pill{ transform:none!important; }
+
+            /* Panel */
+            .tbl-panel-outer{position:relative!important;z-index:20!important;}
+            .tbl-panel-inner{min-height:0!important;align-items:stretch!important;}
+            .tbl-main-col{padding:3px 6px!important;gap:2px!important;}
+
+            /* ── Two-column action layout ─────────────────────────── */
+            .tbl-actions-layout{flex-direction:row!important;align-items:stretch!important;gap:6px!important;}
+            .tbl-btns-col{order:1!important;flex:0 0 auto!important;gap:3px!important;justify-content:center!important;}
+            .tbl-raise-panel{order:2!important;flex:1!important;min-width:0!important;gap:3px!important;justify-content:center!important;border-left:1px solid rgba(255,255,255,0.07)!important;padding-left:7px!important;}
+            .tbl-timer-text{display:none!important;}
+
+            /* Raise row */
+            .tbl-raise-row{padding:3px 5px!important;border-radius:6px!important;gap:4px!important;}
+            .tbl-raise-row input[type="number"]{width:46px!important;font-size:12px!important;}
+
+            /* Range thumb — bigger for touch */
+            .ap-range::-webkit-slider-thumb{width:20px!important;height:20px!important;}
+            .ap-range::-moz-range-thumb{width:20px!important;height:20px!important;}
+
+            /* Quick bet buttons */
+            .tbl-qb-row{flex-wrap:wrap!important;gap:3px!important;}
+            .ap-qb{padding:5px 9px!important;font-size:10px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
+
+            /* Pre-action */
+            .tbl-preaction-label{display:none!important;}
+            .tbl-preaction-row{gap:3px!important;}
+            .tbl-preaction-row button{padding:5px 3px!important;font-size:9px!important;border-radius:6px!important;}
+
+            /* Action buttons */
+            .ap-btn{padding:6px 8px 5px!important;font-size:11px!important;border-radius:7px!important;letter-spacing:0.4px!important;}
+            .ap-sub{font-size:8.5px!important;}
+          }
+
+          /* ── Very narrow screens (e.g. iPhone SE landscape 568px) ── */
+          @media (max-height:380px) and (orientation:landscape){
+            .tbl-header{height:26px!important;}
+            .tbl-chat-panel{width:160px!important;top:30px!important;bottom:54px!important;}
+            .tbl-player-circle{width:26px!important;height:26px!important;font-size:11px!important;}
+            .tbl-player-circle-hero{width:30px!important;height:30px!important;font-size:14px!important;}
+            .tbl-seat-pill{padding:1px 4px!important;min-width:38px!important;}
+            .tbl-seat-pill-name{font-size:5px!important;}
+            .tbl-seat-pill-stack{font-size:8px!important;}
+            .tbl-community-row{transform:scale(0.66);transform-origin:center;}
+            .ap-btn{padding:5px 6px 4px!important;font-size:10px!important;}
+            .ap-qb{padding:3px 6px!important;font-size:9px!important;}
+
+            /* Seat pods need to shrink further than the default --mscale on a   */
+            /* viewport this short — set per table size via data-seatcount so    */
+            /* dense (7-9 max) tables still fit without overlapping.             */
+            .tbl-table-inner[data-seatcount="2"],
+            .tbl-table-inner[data-seatcount="3"],
+            .tbl-table-inner[data-seatcount="4"]{ --mscale:0.5; }
+            .tbl-table-inner[data-seatcount="5"],
+            .tbl-table-inner[data-seatcount="6"]{ --mscale:0.4; }
+            .tbl-table-inner[data-seatcount="7"],
+            .tbl-table-inner[data-seatcount="8"],
+            .tbl-table-inner[data-seatcount="9"]{ --mscale:0.3; }
+          }
+        `}</style>
+        <div className="tbl-panel-outer" style={{
+          flexShrink: 0,
+          background: 'rgba(7, 9, 14, 0.52)',
+          backdropFilter: 'blur(28px) saturate(1.6)',
+          WebkitBackdropFilter: 'blur(28px) saturate(1.6)',
+          borderTop: '1px solid rgba(255,255,255,0.09)',
+          boxShadow: '0 -1px 0 rgba(255,255,255,0.04)',
+          // Push buttons above the iPhone home indicator while the panel
+          // background visually fills the gap all the way to the screen edge
+          paddingBottom: 'env(safe-area-inset-bottom)',
+        }}>
+          <div className={`tbl-panel-inner${preActionOnly ? ' tbl-panel-compact' : ''}`} style={{ display: 'flex', alignItems: 'stretch', minHeight: 86 }}>
 
             {/* ── Main content column ───────────────────────────────── */}
-            <div style={{ flex: 1, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0, justifyContent: 'center' }}>
+            <div className="tbl-main-col" style={{ flex: 1, padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0, justifyContent: 'center' }}>
 
               {/* ── MY TURN: action bar ──────────────────────────────── */}
               {needsMyAction && (() => {
                 const raiseDisabled = raiseAmount < minRaiseTo || raiseAmount > myMaxBet
                 const sliderMax = Math.max(minRaiseTo + 1, myMaxBet)
+                const sliderPct = Math.round(((Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax) - minRaiseTo) / Math.max(1, sliderMax - minRaiseTo)) * 100)
                 return (
-                  <>
-                    {/* Row 1: quick presets + timer — only shown when raising is possible */}
+                  /* tbl-actions-layout:
+                     desktop → flex-col (raise panel above, buttons below)
+                     mobile  → flex-row (buttons LEFT via order:1, raise RIGHT via order:2) */
+                  <div className="tbl-actions-layout" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+
+                    {/* ── RAISE PANEL — above btns on desktop, RIGHT col on mobile ── */}
                     {canRaise && (
-                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 5 }}>
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                          {([
-                            { l: 'Min', fn: () => setRaiseAmount(minRaiseTo) },
-                            { l: '½ Pot', fn: () => quickBet(0.5) },
-                            { l: 'Pot',   fn: () => quickBet(1.0) },
-                            { l: 'Max',   fn: () => setRaiseAmount(myMaxBet) },
-                          ] as const).map(q => (
-                            <button key={q.l} onClick={q.fn} className="ap-qb">{q.l}</button>
-                          ))}
+                      <div className="tbl-raise-panel" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                        {/* Quick bets + timer text (timer text hidden on mobile) */}
+                        <div className="tbl-qb-row" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            {([
+                              { l: 'Min',    fn: () => setRaiseAmount(minRaiseTo) },
+                              { l: '½ Pot',  fn: () => quickBet(0.5) },
+                              { l: 'Pot',    fn: () => quickBet(1.0) },
+                              { l: 'Max',    fn: () => setRaiseAmount(myMaxBet) },
+                            ] as const).map(q => (
+                              <button key={q.l} onClick={q.fn} className="ap-qb">{q.l}</button>
+                            ))}
+                          </div>
+                          <div style={{ flex: 1 }} />
+                          {turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
+                            <span className="tbl-timer-text" style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11, minWidth: 26, textAlign: 'right' }}>{timeLeft}s</span>
+                          )}
                         </div>
-                        <div style={{ flex: 1 }} />
-                        {turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
-                          <span style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11, minWidth: 26, textAlign: 'right' }}>{timeLeft}s</span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Timer row when no raise controls */}
-                    {!canRaise && turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
-                      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-                        <span style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11 }}>{timeLeft}s</span>
-                      </div>
-                    )}
-
-                    {/* Timer bar */}
-                    {turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
-                      <div style={{ height: 3, borderRadius: 2, background: '#1e293b', overflow: 'hidden' }}>
-                        <div style={{
-                          height: '100%', borderRadius: 2,
-                          width: `${Math.min(100, (timeLeft / TIMER_TOTAL) * 100)}%`,
-                          background: timeLeft <= 15 ? '#ef4444' : '#eab308',
-                          transition: 'width 0.25s linear, background 0.3s',
-                        }} />
-                      </div>
-                    )}
-
-                    {/* Row 2: raise amount + slider — only shown when raising is possible */}
-                    {canRaise && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 10, padding: '9px 14px' }}>
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
-                          <span style={{ fontSize: 9, letterSpacing: '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>Raise to</span>
+                        {/* Raise amount + slider */}
+                        <div className="tbl-raise-row" style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 10, padding: '9px 14px' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
+                            <span style={{ fontSize: 9, letterSpacing: '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>Raise to</span>
+                            <input
+                              type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
+                              step={state.bigBlind}
+                              onChange={e => setRaiseAmount(Number(e.target.value))}
+                              style={{ width: 70, background: 'transparent', border: 'none', outline: 'none', fontFamily: '"JetBrains Mono",monospace', fontSize: 15, fontWeight: 600, color: '#e8c97a', textAlign: 'right', padding: 0 }}
+                            />
+                          </div>
                           <input
-                            type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
+                            type="range" className="ap-range"
+                            min={minRaiseTo} max={sliderMax}
                             step={state.bigBlind}
+                            value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
                             onChange={e => setRaiseAmount(Number(e.target.value))}
-                            style={{ width: 70, background: 'transparent', border: 'none', outline: 'none', fontFamily: '"JetBrains Mono",monospace', fontSize: 15, fontWeight: 600, color: '#e8c97a', textAlign: 'right', padding: 0 }}
+                            style={{ flex: 1, background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)` }}
                           />
                         </div>
-                        <input
-                          type="range" className="ap-range"
-                          min={minRaiseTo} max={sliderMax}
-                          step={state.bigBlind}
-                          value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
-                          onChange={e => setRaiseAmount(Number(e.target.value))}
-                          style={{ flex: 1, background: `linear-gradient(to right,#c9a84c ${Math.round(((Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax) - minRaiseTo) / Math.max(1, sliderMax - minRaiseTo)) * 100)}%,rgba(255,255,255,0.1) ${Math.round(((Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax) - minRaiseTo) / Math.max(1, sliderMax - minRaiseTo)) * 100)}%)` }}
-                        />
                       </div>
                     )}
 
-                    {/* Row 3: action buttons */}
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button onClick={() => sendAction('FOLD')} className="ap-btn ap-fold">
-                        Fold<span className="ap-sub">Muck</span>
-                      </button>
-
-                      {canCheck ? (
-                        <button onClick={() => sendAction('CHECK')} className="ap-btn ap-check">
-                          Check<span className="ap-sub">No bet</span>
-                        </button>
-                      ) : mustGoAllIn ? (
-                        /* Can't afford the call — only all-in is possible */
-                        <button onClick={() => sendAction('ALL_IN')} className="ap-btn ap-allin" style={{ flex: 1.35 }}>
-                          All-In<span className="ap-sub">{myStack.toLocaleString()}</span>
-                        </button>
-                      ) : (
-                        <button onClick={() => sendAction('CALL')} className="ap-btn ap-call">
-                          Call<span className="ap-sub">{callAmt.toLocaleString()}</span>
-                        </button>
+                    {/* ── BUTTONS COL — below raise on desktop, LEFT col on mobile ── */}
+                    <div className="tbl-btns-col" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {/* Timer when no raise */}
+                      {!canRaise && turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
+                        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                          <span style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11 }}>{timeLeft}s</span>
+                        </div>
                       )}
-
-                      {canRaise && (
-                        <>
-                          <button
-                            onClick={() => sendAction('RAISE', raiseAmount)}
-                            disabled={raiseDisabled}
-                            className="ap-btn ap-raise"
-                          >
-                            Raise<span className="ap-sub">to {raiseAmount.toLocaleString()}</span>
-                          </button>
-
-                          <button onClick={() => sendAction('ALL_IN')} className="ap-btn ap-allin">
-                            All-In<span className="ap-sub">{myStack.toLocaleString()}</span>
-                          </button>
-                        </>
+                      {/* Timer bar */}
+                      {turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
+                        <div className="tbl-timer-bar" style={{ height: 3, borderRadius: 2, background: '#1e293b', overflow: 'hidden' }}>
+                          <div style={{
+                            height: '100%', borderRadius: 2,
+                            width: `${Math.min(100, (timeLeft / TIMER_TOTAL) * 100)}%`,
+                            background: timeLeft <= 15 ? '#ef4444' : '#eab308',
+                            transition: 'width 0.25s linear, background 0.3s',
+                          }} />
+                        </div>
                       )}
+                      {/* Action buttons */}
+                      <div className="tbl-btn-row" style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={() => sendAction('FOLD')} className="ap-btn ap-fold">
+                          Fold<span className="ap-sub">Muck</span>
+                        </button>
+
+                        {canCheck ? (
+                          <button onClick={() => sendAction('CHECK')} className="ap-btn ap-check">
+                            Check<span className="ap-sub">No bet</span>
+                          </button>
+                        ) : mustGoAllIn ? (
+                          <button onClick={() => sendAction('ALL_IN')} className="ap-btn ap-allin" style={{ flex: 1.35 }}>
+                            All-In<span className="ap-sub">{formatNumber(myStack)}</span>
+                          </button>
+                        ) : (
+                          <button onClick={() => sendAction('CALL')} className="ap-btn ap-call">
+                            Call<span className="ap-sub">{formatNumber(callAmt)}</span>
+                          </button>
+                        )}
+
+                        {canRaise && (
+                          <>
+                            <button
+                              onClick={() => sendAction('RAISE', raiseAmount)}
+                              disabled={raiseDisabled}
+                              className="ap-btn ap-raise"
+                            >
+                              Raise<span className="ap-sub">to {formatNumber(raiseAmount)}</span>
+                            </button>
+                            <button onClick={() => sendAction('ALL_IN')} className="ap-btn ap-allin">
+                              All-In<span className="ap-sub">{formatNumber(myStack)}</span>
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
-                  </>
+
+                  </div>
                 )
               })()}
 
@@ -1648,10 +2839,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                   {/* Pre-action buttons: shown when hand is live, it's not my turn, and I'm active */}
                   {myStatus === 'seated' && hand && !isMyTurn && myHP?.playerPhase === 'active' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <span style={{ color: '#475569', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
+                      <span className="tbl-preaction-label" style={{ color: '#475569', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
                         Pre-Action
                       </span>
-                      <div style={{ display: 'flex', gap: 5 }}>
+                      <div className="tbl-preaction-row" style={{ display: 'flex', gap: 5 }}>
                         {([
                           { id: 'auto-check' as PreAction, label: 'Auto-Check', desc: 'Check if no bet; otherwise act normally' },
                           { id: 'check-fold' as PreAction, label: 'Check / Fold', desc: 'Check if free; fold if there is a bet' },
@@ -1695,7 +2886,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             <span key={p.playerId} style={{ fontSize: 11 }}>
                               <span style={{ color: '#64748b' }}>{p.username} </span>
                               <span style={{ color: p.netChipChange > 0 ? '#4ade80' : p.netChipChange < 0 ? '#f87171' : '#6b7280', fontWeight: 700 }}>
-                                {p.netChipChange > 0 ? '+' : ''}{p.netChipChange.toLocaleString()}
+                                {p.netChipChange > 0 ? '+' : ''}{formatNumber(p.netChipChange)}
                               </span>
                             </span>
                           ))}

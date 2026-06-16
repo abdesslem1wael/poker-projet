@@ -27,6 +27,7 @@ export type PublicPlayerHandState = {
 
 // ── Public hand state ──────────────────────────────────────────────────────
 export type PublicHandState = {
+  handNumber: number
   phase: 'PRE_FLOP' | 'FLOP' | 'TURN' | 'RIVER'
   pot: number
   currentBet: number
@@ -50,6 +51,24 @@ export interface ClientToServerEvents {
     action: BettingAction
     amount?: number  // for RAISE: the new total bet level; omitted for other actions
   }) => void
+  // Voluntary tip sent by a player after winning a hand.
+  send_tip: (payload: {
+    tableId: string
+    handNumber: number
+    amount: number
+  }) => void
+  // Player voluntarily reveals their hole cards after folding.
+  reveal_hand: (payload: {
+    tableId: string
+    handNumber: number
+    cards: [Card, Card]
+  }) => void
+  // Admin: extend a table's active session.
+  extend_session: (payload: { tableId: string; additionalMinutes: number }) => void
+  // Admin: remove a seated player from a table.
+  kick_player: (payload: { tableId: string; playerId: string }) => void
+  // Live table chat — sender must be seated or spectating this table.
+  table_chat_send: (payload: { tableId: string; message: string }) => void
 }
 
 // ── Public payload types ───────────────────────────────────────────────────
@@ -57,6 +76,7 @@ export type SeatInfo = {
   seatNumber: number
   playerId: string | null
   username: string | null
+  avatarId: number | null
 }
 
 export type SpectatorInfo = {
@@ -94,14 +114,27 @@ export type ShowdownPlayerResult = {
   netChipChange: number     // chipDelta − totalContributed (positive = profit, negative = loss)
   hasFolded: boolean
   holeCards: [Card, Card] | null  // null when all_folded (no showdown reveal)
+  bestHand: [Card, Card, Card, Card, Card] | null  // exact 5-card winning combination; null for folded/all_folded
+  handName: string | null   // e.g. "Flush" — null for folded or all_folded scenarios
 }
 
 export type ShowdownPayload = {
   tableId: string
+  handNumber: number
   reason: 'all_folded' | 'showdown'
   pots: ShowdownPotResult[]
   players: ShowdownPlayerResult[]
   communityCards: Card[]
+  tipAmount: number  // automatic rake — admin-only display, not sent to regular players
+}
+
+// ── Table chat (live-only, not persisted) ──────────────────────────────────
+export type ChatMessage = {
+  tableId: string
+  playerId: string
+  username: string
+  message: string
+  createdAt: string  // ISO timestamp
 }
 
 // ── Server → Client ────────────────────────────────────────────────────────
@@ -136,6 +169,28 @@ export interface ServerToClientEvents {
     tableId: string
     seconds: number
   }) => void
+  // Emitted when all players are all-in and the remaining streets will be auto-dealt.
+  runout_cards_revealed: (payload: {
+    tableId: string
+    players: Array<{ playerId: string; cards: [Card, Card] }>
+  }) => void
+  // Emitted when a player voluntarily shows their folded hole cards.
+  hand_revealed: (payload: {
+    tableId: string
+    playerId: string
+    cards: [Card, Card]
+  }) => void
+  // Emitted every ~5 s to all table members and the admin room.
+  session_update: (payload: {
+    tableId: string
+    tableName: string
+    secondsRemaining: number
+    isExpired: boolean
+  }) => void
+  // Emitted only to the socket(s) of a player who has been removed by admin.
+  kicked_from_table: (payload: { tableId: string }) => void
+  // Live table chat — broadcast to everyone (seated + spectating) in the table room.
+  table_chat_message: (payload: ChatMessage) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────

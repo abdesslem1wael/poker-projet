@@ -2,6 +2,7 @@ import Link from 'next/link'
 import { createAdminClient } from '@/lib/supabase/admin'
 import CreatePlayerForm from './CreatePlayerForm'
 import AdjustChipsForm from './AdjustChipsForm'
+import DeletePlayerButton from './DeletePlayerButton'
 import type { PlayerSummary } from './AdjustChipsForm'
 
 type WalletRow = { chips: number }
@@ -37,61 +38,86 @@ export default async function AdminPlayersPage() {
   }))
 
   return (
-    <main className="mx-auto w-full max-w-4xl space-y-8 px-6 py-10">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold">Players</h1>
-        <Link
-          href="/admin/dashboard"
-          className="text-sm text-zinc-500 transition-colors hover:text-zinc-900 dark:hover:text-zinc-100"
-        >
-          ← Dashboard
-        </Link>
-      </div>
+    <main className="min-h-screen bg-zinc-950 text-zinc-100">
+      <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-900/90 backdrop-blur">
+        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+          <h1 className="text-lg font-bold tracking-tight">Players</h1>
+          <Link
+            href="/admin/dashboard"
+            className="text-sm text-zinc-400 transition-colors hover:text-zinc-200"
+          >
+            ← Dashboard
+          </Link>
+        </div>
+      </header>
 
-      {/* Player list */}
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold">All Players</h2>
-        {players.length === 0 ? (
-          <p className="text-sm text-zinc-500">No players yet.</p>
-        ) : (
-          <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-800">
-            <table className="w-full border-collapse text-sm">
-              <thead>
-                <tr className="border-b border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
-                  <th className="px-4 py-3 text-left font-medium text-zinc-600 dark:text-zinc-400">
-                    Username
-                  </th>
-                  <th className="px-4 py-3 text-right font-medium text-zinc-600 dark:text-zinc-400">
-                    Chips
-                  </th>
-                  <th className="px-4 py-3 text-left font-medium text-zinc-600 dark:text-zinc-400">
-                    Member Since
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {players.map((p) => (
-                  <tr
-                    key={p.id}
-                    className="transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900/50"
-                  >
-                    <td className="px-4 py-3 font-medium">{p.username}</td>
-                    <td className="px-4 py-3 text-right tabular-nums">
-                      {getChips(p.wallets).toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3 text-zinc-500">
-                      {new Date(p.created_at).toLocaleDateString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <div className="mx-auto max-w-5xl space-y-8 px-6 py-8">
+        {/* Player list */}
+        <section className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+          <div className="px-5 py-4 border-b border-zinc-800">
+            <h2 className="font-semibold text-zinc-100">
+              All Players
+              {players.length > 0 && (
+                <span className="ml-2 text-sm font-normal text-zinc-500">
+                  ({players.length})
+                </span>
+              )}
+            </h2>
           </div>
-        )}
-      </section>
 
-      <CreatePlayerForm />
-      <AdjustChipsForm players={summaries} />
+          {players.length === 0 ? (
+            <p className="px-5 py-6 text-sm text-zinc-500">No players yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-800 bg-zinc-800/60">
+                    <th className="px-5 py-3 text-left font-medium text-zinc-400">
+                      Username
+                    </th>
+                    <th className="px-5 py-3 text-right font-medium text-zinc-400">
+                      Chips
+                    </th>
+                    <th className="px-5 py-3 text-left font-medium text-zinc-400">
+                      Member Since
+                    </th>
+                    <th className="px-5 py-3 text-right font-medium text-zinc-400">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800">
+                  {players.map((p) => (
+                    <tr
+                      key={p.id}
+                      className="transition-colors hover:bg-zinc-800/40"
+                    >
+                      <td className="px-5 py-3 font-medium text-zinc-100">
+                        {p.username}
+                      </td>
+                      <td className="px-5 py-3 text-right tabular-nums text-zinc-300">
+                        {getChips(p.wallets).toLocaleString()}
+                      </td>
+                      <td className="px-5 py-3 text-zinc-500">
+                        {new Date(p.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="px-5 py-3 text-right">
+                        <DeletePlayerButton
+                          playerId={p.id}
+                          username={p.username}
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <CreatePlayerForm />
+        <AdjustChipsForm players={summaries} />
+      </div>
     </main>
   )
 }

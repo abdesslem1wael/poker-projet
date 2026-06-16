@@ -41,6 +41,7 @@ function makeAllFolded(winnerContributed: number, otherContributed: number): Han
     startedAt: new Date(),
     communityCards: [],
     pot,
+    tipAmount: 0,
     players: [
       {
         playerId: 'p1', username: 'Alice', seatNumber: 1,
@@ -109,6 +110,7 @@ describe('computeShowdown — showdown (single winner)', () => {
     startedAt: new Date(),
     communityCards: BOARD,
     pot: 200,
+    tipAmount: 0,
     players: [
       {
         playerId: 'p1', username: 'Alice', seatNumber: 1,
@@ -166,6 +168,7 @@ describe('computeShowdown — folded player cannot win', () => {
       startedAt: new Date(),
       communityCards: BOARD,
       pot: 150,
+    tipAmount: 0,
       players: [
         {
           playerId: 'p1', username: 'Alice', seatNumber: 1,
@@ -195,6 +198,7 @@ describe('computeShowdown — folded player cannot win', () => {
       startedAt: new Date(),
       communityCards: BOARD,
       pot: 150,
+    tipAmount: 0,
       players: [
         {
           playerId: 'p1', username: 'Alice', seatNumber: 1,
@@ -226,6 +230,7 @@ describe('computeShowdown — side pots', () => {
     startedAt: new Date(),
     communityCards: SIDE_POT_BOARD,
     pot: 110,
+    tipAmount: 0,
     players: [
       {
         playerId: 'p1', username: 'Alice', seatNumber: 1,
@@ -288,6 +293,7 @@ describe('computeShowdown — tie (pot split)', () => {
     startedAt: new Date(),
     communityCards: FULL_BOARD_STRAIGHT,
     pot: 200,
+    tipAmount: 0,
     players: [
       {
         playerId: 'p1', username: 'Alice', seatNumber: 1,
@@ -342,6 +348,7 @@ describe('computeShowdown — chip conservation invariant', () => {
         startedAt: new Date(),
         communityCards: BOARD,
         pot: 300,
+    tipAmount: 0,
         players: [
           {
             playerId: 'p1', username: 'Alice', seatNumber: 1,

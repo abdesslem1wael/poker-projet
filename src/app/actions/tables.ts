@@ -79,6 +79,34 @@ export async function closeTableAction(
   redirect('/admin/tables')
 }
 
+export async function getSeatedPlayersAction(
+  tableId: string
+): Promise<Array<{ playerId: string; username: string }>> {
+  const adminUser = await requireAdmin()
+  if (!adminUser) return []
+
+  const adminClient = createAdminClient()
+
+  const { data: playersData } = await adminClient
+    .from('table_players')
+    .select('player_id')
+    .eq('table_id', tableId)
+    .eq('status', 'seated')
+
+  const playerIds = ((playersData as Array<{ player_id: string }> | null) ?? []).map(p => p.player_id)
+  if (playerIds.length === 0) return []
+
+  const { data: profilesData } = await adminClient
+    .from('profiles')
+    .select('id, username')
+    .in('id', playerIds)
+
+  return ((profilesData as Array<{ id: string; username: string }> | null) ?? []).map(p => ({
+    playerId: p.id,
+    username: p.username,
+  }))
+}
+
 export async function reopenTableAction(
   tableId: string,
   _formData: FormData

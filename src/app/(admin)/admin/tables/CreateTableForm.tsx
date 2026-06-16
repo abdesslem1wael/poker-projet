@@ -6,7 +6,7 @@ import { createTableAction } from '@/app/actions/tables'
 import type { ActionState } from '@/app/actions/tables'
 
 const inputClass =
-  'w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900'
+  'w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600/30 transition-colors'
 
 export default function CreateTableForm() {
   const [state, action, pending] = useActionState<ActionState, FormData>(
@@ -22,12 +22,14 @@ export default function CreateTableForm() {
       : '—'
 
   return (
-    <section className="space-y-4 rounded-lg border border-zinc-200 p-6 dark:border-zinc-800">
-      <h2 className="text-lg font-semibold">Create Table</h2>
-      <form action={action} className="space-y-4">
+    <section className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+      <div className="px-5 py-4 border-b border-zinc-800">
+        <h2 className="font-semibold text-zinc-100">Create Table</h2>
+      </div>
+      <form action={action} className="p-5 space-y-5">
         <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1 sm:col-span-2">
-            <label htmlFor="name" className="block text-sm font-medium">
+          <div className="space-y-1.5 sm:col-span-2">
+            <label htmlFor="name" className="block text-sm font-medium text-zinc-300">
               Table Name
             </label>
             <input
@@ -40,8 +42,8 @@ export default function CreateTableForm() {
             />
           </div>
 
-          <div className="space-y-1">
-            <label htmlFor="smallBlind" className="block text-sm font-medium">
+          <div className="space-y-1.5">
+            <label htmlFor="smallBlind" className="block text-sm font-medium text-zinc-300">
               Small Blind
             </label>
             <input
@@ -56,15 +58,15 @@ export default function CreateTableForm() {
             />
           </div>
 
-          <div className="space-y-1">
-            <p className="text-sm font-medium">Big Blind (auto)</p>
-            <div className="flex h-9 items-center rounded-md border border-zinc-200 bg-zinc-50 px-3 text-sm tabular-nums text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400">
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium text-zinc-300">Big Blind (auto)</p>
+            <div className="flex h-9 items-center rounded-lg border border-zinc-700 bg-zinc-800/50 px-3 text-sm tabular-nums text-zinc-400">
               {bigBlindDisplay}
             </div>
           </div>
 
-          <div className="space-y-1">
-            <label htmlFor="maxPlayers" className="block text-sm font-medium">
+          <div className="space-y-1.5">
+            <label htmlFor="maxPlayers" className="block text-sm font-medium text-zinc-300">
               Max Players
             </label>
             <select
@@ -83,7 +85,7 @@ export default function CreateTableForm() {
         </div>
 
         {state?.error && (
-          <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+          <p role="alert" className="rounded-lg border border-red-900/50 bg-red-900/20 px-3 py-2 text-sm text-red-400">
             {state.error}
           </p>
         )}
@@ -91,7 +93,7 @@ export default function CreateTableForm() {
         <button
           type="submit"
           disabled={pending}
-          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:opacity-50"
         >
           {pending ? 'Creating…' : 'Create Table'}
         </button>

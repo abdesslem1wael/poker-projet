@@ -152,3 +152,21 @@ export async function adjustChipsAction(
   revalidatePath('/admin/players')
   redirect('/admin/players')
 }
+
+export async function deletePlayerAction(
+  _state: ActionState,
+  formData: FormData
+): Promise<ActionState> {
+  const admin = await requireAdmin()
+  if (!admin) return { error: 'Unauthorized' }
+
+  const playerId = (formData.get('playerId') as string).trim()
+  if (!playerId) return { error: 'Player ID required' }
+
+  const adminClient = createAdminClient()
+  const { error } = await adminClient.auth.admin.deleteUser(playerId)
+  if (error) return { error: error.message }
+
+  revalidatePath('/admin/players')
+  redirect('/admin/players')
+}

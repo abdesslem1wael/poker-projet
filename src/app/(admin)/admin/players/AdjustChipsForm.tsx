@@ -22,9 +22,11 @@ export default function AdjustChipsForm({ players }: Props) {
 
   if (players.length === 0) {
     return (
-      <section className="space-y-4 rounded-lg border border-zinc-200 p-6 dark:border-zinc-800">
-        <h2 className="text-lg font-semibold">Adjust Chips</h2>
-        <p className="text-sm text-zinc-500">
+      <section className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+        <div className="px-5 py-4 border-b border-zinc-800">
+          <h2 className="font-semibold text-zinc-100">Adjust Chips</h2>
+        </div>
+        <p className="px-5 py-6 text-sm text-zinc-500">
           No players yet. Create a player first.
         </p>
       </section>
@@ -32,19 +34,21 @@ export default function AdjustChipsForm({ players }: Props) {
   }
 
   return (
-    <section className="space-y-4 rounded-lg border border-zinc-200 p-6 dark:border-zinc-800">
-      <h2 className="text-lg font-semibold">Adjust Chips</h2>
-      <form action={action} className="space-y-4">
+    <section className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+      <div className="px-5 py-4 border-b border-zinc-800">
+        <h2 className="font-semibold text-zinc-100">Adjust Chips</h2>
+      </div>
+      <form action={action} className="p-5 space-y-5">
         <div className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1">
-            <label htmlFor="playerId" className="block text-sm font-medium">
+          <div className="space-y-1.5">
+            <label htmlFor="playerId" className="block text-sm font-medium text-zinc-300">
               Player
             </label>
             <select
               id="playerId"
               name="playerId"
               required
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600/30 transition-colors"
             >
               {players.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -53,22 +57,22 @@ export default function AdjustChipsForm({ players }: Props) {
               ))}
             </select>
           </div>
-          <div className="space-y-1">
-            <label htmlFor="type" className="block text-sm font-medium">
+          <div className="space-y-1.5">
+            <label htmlFor="type" className="block text-sm font-medium text-zinc-300">
               Type
             </label>
             <select
               id="type"
               name="type"
               required
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600/30 transition-colors"
             >
-              <option value="admin_topup">Admin Top-up</option>
-              <option value="admin_deduction">Admin Deduction</option>
+              <option value="admin_topup">Top-up (add chips)</option>
+              <option value="admin_deduction">Deduction (remove chips)</option>
             </select>
           </div>
-          <div className="space-y-1">
-            <label htmlFor="amount" className="block text-sm font-medium">
+          <div className="space-y-1.5">
+            <label htmlFor="amount" className="block text-sm font-medium text-zinc-300">
               Amount
             </label>
             <input
@@ -77,31 +81,31 @@ export default function AdjustChipsForm({ players }: Props) {
               type="number"
               required
               min={1}
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600/30 transition-colors"
             />
           </div>
-          <div className="space-y-1">
-            <label htmlFor="note" className="block text-sm font-medium">
+          <div className="space-y-1.5">
+            <label htmlFor="note" className="block text-sm font-medium text-zinc-300">
               Note{' '}
-              <span className="text-zinc-400 dark:text-zinc-500">(optional)</span>
+              <span className="text-zinc-500 font-normal">(optional)</span>
             </label>
             <input
               id="note"
               name="note"
               type="text"
-              className="w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-900"
+              className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600/30 transition-colors"
             />
           </div>
         </div>
         {state?.error && (
-          <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+          <p role="alert" className="rounded-lg border border-red-900/50 bg-red-900/20 px-3 py-2 text-sm text-red-400">
             {state.error}
           </p>
         )}
         <button
           type="submit"
           disabled={pending}
-          className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          className="rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:opacity-50"
         >
           {pending ? 'Adjusting…' : 'Adjust Chips'}
         </button>

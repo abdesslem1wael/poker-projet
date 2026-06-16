@@ -32,6 +32,8 @@ export interface HandState {
   currentBet: number          // current bet level in this street
   minRaise: number            // minimum raise increment
   currentActorIndex: number   // index into players[]; -1 when nobody to act
+  tipPool: number             // accumulated automatic tips for this hand
+  voluntaryRaiseLevel: number // last voluntary raise level for tip tracking (0 = none yet)
 }
 
 export interface TableGame {
@@ -51,6 +53,7 @@ export interface HandEndedData {
   startedAt: Date
   communityCards: Card[]
   pot: number
+  tipAmount: number           // automatic rake/tip accumulated during betting
   players: ReadonlyArray<{
     playerId: string
     username: string

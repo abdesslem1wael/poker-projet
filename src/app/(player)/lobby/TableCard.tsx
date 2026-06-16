@@ -19,11 +19,7 @@ export default function TableCard({ table }: { table: TableRow }) {
   const [loading, setLoading] = useState<'join' | 'spectate' | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  function withListeners(
-    socket: AppSocket,
-    tableId: string,
-    onSuccess: () => void,
-  ) {
+  function withListeners(socket: AppSocket, tableId: string, onSuccess: () => void) {
     let settled = false
     const settle = () => {
       if (settled) return
@@ -67,12 +63,12 @@ export default function TableCard({ table }: { table: TableRow }) {
   const isActive = table.status === 'active'
 
   return (
-    <div className="group flex flex-col gap-4 rounded-xl border border-zinc-800 bg-zinc-900/70 p-5 transition-colors hover:border-zinc-600 hover:bg-zinc-900">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2">
-        <h3 className="font-semibold text-zinc-100 truncate">{table.name}</h3>
+    <div className="w-full min-w-0 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+      {/* Name + status — min-w-0 on the row lets the h3 flex-1 actually truncate */}
+      <div className="mb-3 flex min-w-0 items-center justify-between gap-2">
+        <h3 className="min-w-0 flex-1 truncate text-base font-bold text-zinc-100">{table.name}</h3>
         <span className={[
-          'shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium',
+          'shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-semibold',
           isActive
             ? 'bg-green-900/60 text-green-400 ring-1 ring-green-700/50'
             : 'bg-amber-900/60 text-amber-400 ring-1 ring-amber-700/50',
@@ -81,39 +77,39 @@ export default function TableCard({ table }: { table: TableRow }) {
         </span>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 gap-3 text-sm">
-        <div className="rounded-lg bg-zinc-800/60 px-3 py-2">
-          <p className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">Blinds</p>
-          <p className="mt-0.5 font-semibold tabular-nums text-zinc-200">
+      {/* Stats row */}
+      <div className="mb-4 grid grid-cols-2 gap-2 text-sm">
+        <div className="rounded-lg bg-zinc-800/60 px-3 py-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Blinds</p>
+          <p className="mt-0.5 font-bold tabular-nums text-zinc-200">
             {table.small_blind.toLocaleString()} / {table.big_blind.toLocaleString()}
           </p>
         </div>
-        <div className="rounded-lg bg-zinc-800/60 px-3 py-2">
-          <p className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">Max Seats</p>
-          <p className="mt-0.5 font-semibold text-zinc-200">{table.max_players}</p>
+        <div className="rounded-lg bg-zinc-800/60 px-3 py-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Max Seats</p>
+          <p className="mt-0.5 font-bold text-zinc-200">{table.max_players}</p>
         </div>
       </div>
 
       {error && (
-        <p className="rounded-md bg-red-950/40 px-3 py-1.5 text-xs text-red-400 ring-1 ring-red-800/50">
+        <p className="mb-3 rounded-lg bg-red-950/40 px-3 py-2 text-xs text-red-400 ring-1 ring-red-800/50">
           {error}
         </p>
       )}
 
-      {/* Actions */}
+      {/* Action buttons */}
       <div className="flex gap-2">
         <button
           onClick={handleJoin}
           disabled={loading !== null}
-          className="flex-1 rounded-lg bg-green-700 py-2 text-sm font-semibold text-white transition-colors hover:bg-green-600 disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex-1 rounded-xl bg-emerald-600 py-3.5 text-sm font-bold text-white transition-colors active:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {loading === 'join' ? 'Joining…' : 'Join Table'}
         </button>
         <button
           onClick={handleSpectate}
           disabled={loading !== null}
-          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
+          className="shrink-0 rounded-xl border border-zinc-700 px-4 py-3.5 text-sm font-semibold text-zinc-300 transition-colors active:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {loading === 'spectate' ? '…' : 'Watch'}
         </button>

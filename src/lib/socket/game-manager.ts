@@ -20,7 +20,13 @@ import type {
 type DB = any
 
 export type ActionResult =
-  | { ok: true; handEnded?: false }
+  | { ok: true; handEnded?: false; runout?: false }
+  | { ok: true; handEnded?: false; runout: true }
+  | { ok: true; handEnded: true; data: HandEndedData }
+  | { error: string }
+
+export type RunoutStreetResult =
+  | { ok: true; phase: string; communityCards: Card[]; handEnded: false }
   | { ok: true; handEnded: true; data: HandEndedData }
   | { error: string }
 
@@ -45,6 +51,7 @@ export class GameManager {
     if (!s) return null
     const actor = s.currentActorIndex >= 0 ? s.players[s.currentActorIndex] : null
     return {
+      handNumber: s.handNumber,
       phase: s.phase,
       pot: s.pot,
       currentBet: s.currentBet,
@@ -68,6 +75,15 @@ export class GameManager {
     }
   }
 
+  // Returns all non-folded players' hole cards for a runout reveal.
+  getAllHoleCards(tableId: string): Array<{ playerId: string; cards: [Card, Card] }> {
+    const s = this.games.get(tableId)?.handState
+    if (!s) return []
+    return s.players
+      .filter(p => p.status !== 'folded')
+      .map(p => ({ playerId: p.playerId, cards: [p.holeCards[0], p.holeCards[1]] as [Card, Card] }))
+  }
+
   // Returns null if the player has no hole cards (spectator, or no active hand).
   getPlayerHoleCards(tableId: string, playerId: string): [Card, Card] | null {
     const s = this.games.get(tableId)?.handState
@@ -88,7 +104,6 @@ export class GameManager {
 
     // Sort by seat number for a consistent, deterministic player order.
     const sorted = [...seatedPlayers].sort((a, b) => a.seatNumber - b.seatNumber)
-    const n = sorted.length
 
     // Load stacks from the wallets table.
     const { data: walletRows, error: walletErr } = await supabase
@@ -103,44 +118,44 @@ export class GameManager {
       stackMap.set(w.user_id, w.chips)
     }
 
-    for (const p of sorted) {
-      if ((stackMap.get(p.playerId) ?? 0) === 0) {
-        return { error: `${p.username} has no chips` }
-      }
-    }
+    // Safety net: server.ts filters broke players before calling startHand,
+    // but skip any that somehow arrive here with 0 chips.
+    const active = sorted.filter(p => (stackMap.get(p.playerId) ?? 0) > 0)
+    if (active.length < 2) return { error: 'Not enough players with chips to start' }
+    const n2 = active.length
 
     const game = this.getOrCreate(tableId)
 
     // Rotate the dealer button.
-    const seatNums = sorted.map(p => p.seatNumber)
+    const seatNums = active.map(p => p.seatNumber)
     const dealerIdx = this.nextDealerIndex(game.dealerSeatNumber, seatNums)
-    const dealerSeatNumber = sorted[dealerIdx].seatNumber
+    const dealerSeatNumber = active[dealerIdx].seatNumber
 
     // Determine SB, BB and first-to-act positions.
     let sbIdx: number
     let bbIdx: number
     let firstActorIdx: number
-    if (n === 2) {
+    if (n2 === 2) {
       // Heads-up: dealer = SB, SB acts first pre-flop.
       sbIdx = dealerIdx
-      bbIdx = (dealerIdx + 1) % n
+      bbIdx = (dealerIdx + 1) % n2
       firstActorIdx = sbIdx
     } else {
-      sbIdx = (dealerIdx + 1) % n
-      bbIdx = (dealerIdx + 2) % n
-      firstActorIdx = (dealerIdx + 3) % n
+      sbIdx = (dealerIdx + 1) % n2
+      bbIdx = (dealerIdx + 2) % n2
+      firstActorIdx = (dealerIdx + 3) % n2
     }
 
     // Create and shuffle a fresh deck.
     const deckCopy = [...shuffle(createDeck())]
 
     // Deal one card at a time starting from the SB position.
-    const firstCards: Card[] = new Array(n)
-    const secondCards: Card[] = new Array(n)
-    for (let i = 0; i < n; i++) firstCards[(sbIdx + i) % n] = deckCopy.shift()!
-    for (let i = 0; i < n; i++) secondCards[(sbIdx + i) % n] = deckCopy.shift()!
+    const firstCards: Card[] = new Array(n2)
+    const secondCards: Card[] = new Array(n2)
+    for (let i = 0; i < n2; i++) firstCards[(sbIdx + i) % n2] = deckCopy.shift()!
+    for (let i = 0; i < n2; i++) secondCards[(sbIdx + i) % n2] = deckCopy.shift()!
 
-    const players: PlayerHandState[] = sorted.map((p, i) => ({
+    const players: PlayerHandState[] = active.map((p, i) => ({
       playerId: p.playerId,
       username: p.username,
       seatNumber: p.seatNumber,
@@ -168,9 +183,9 @@ export class GameManager {
 
     // Find the first active player starting from firstActorIdx.
     let actorIdx = firstActorIdx
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < n2; i++) {
       if (players[actorIdx].status === 'active') break
-      actorIdx = (actorIdx + 1) % n
+      actorIdx = (actorIdx + 1) % n2
     }
     if (players[actorIdx].status !== 'active') actorIdx = -1
 
@@ -185,12 +200,14 @@ export class GameManager {
       communityCards: [],
       players,
       dealerSeatNumber,
-      smallBlindSeatNumber: sorted[sbIdx].seatNumber,
-      bigBlindSeatNumber: sorted[bbIdx].seatNumber,
+      smallBlindSeatNumber: active[sbIdx].seatNumber,
+      bigBlindSeatNumber: active[bbIdx].seatNumber,
       pot: sbAmt + bbAmt,
       currentBet: bigBlind,
       minRaise: bigBlind,
       currentActorIndex: actorIdx,
+      tipPool: 0,
+      voluntaryRaiseLevel: 0,
     }
 
     game.dealerSeatNumber = dealerSeatNumber
@@ -255,12 +272,15 @@ export class GameManager {
         if (needed > actor.stack) {
           return { error: 'Not enough chips — use ALL_IN instead' }
         }
+        // Settle tip for the previous voluntary raise level (before this actor's chips change).
+        this.settleTipForRound(state)
         actor.stack -= needed
         actor.roundContribution += needed
         actor.totalContributed += needed
         state.pot += needed
         state.minRaise = raiseBy
         state.currentBet = amount
+        state.voluntaryRaiseLevel = amount
         if (actor.stack === 0) actor.status = 'all-in'
         actor.hasActedThisRound = true
         // All other active players must act again after a raise.
@@ -274,17 +294,23 @@ export class GameManager {
 
       case 'ALL_IN': {
         const allIn = actor.stack
-        actor.roundContribution += allIn
+        const newContrib = actor.roundContribution + allIn
+        // If this constitutes a raise (new contribution exceeds current bet), settle previous tip.
+        if (newContrib > state.currentBet) {
+          this.settleTipForRound(state)
+        }
+        actor.roundContribution = newContrib
         actor.totalContributed += allIn
         state.pot += allIn
         actor.stack = 0
         actor.status = 'all-in'
         actor.hasActedThisRound = true
         // If the all-in constitutes a full raise, update currentBet and reset others.
-        if (actor.roundContribution > state.currentBet) {
-          const raiseBy = actor.roundContribution - state.currentBet
+        if (newContrib > state.currentBet) {
+          const raiseBy = newContrib - state.currentBet
           if (raiseBy >= state.minRaise) state.minRaise = raiseBy
-          state.currentBet = actor.roundContribution
+          state.currentBet = newContrib
+          state.voluntaryRaiseLevel = newContrib
           for (const p of state.players) {
             if (p.playerId !== actor.playerId && p.status === 'active') {
               p.hasActedThisRound = false
@@ -308,10 +334,14 @@ export class GameManager {
 
     if (this.isBettingRoundComplete(state)) {
       const cont = this.advanceToNextRound(state)
-      if (!cont) {
+      if (cont === false) {
         const data = this.buildHandEndedData(state, game.handCount, 'showdown')
         game.handState = null
         return { ok: true, handEnded: true, data }
+      }
+      if (cont === 'runout') {
+        // All remaining players are all-in — server will deal remaining streets with delays.
+        return { ok: true, runout: true }
       }
     } else {
       this.advanceTurnIndex(state)
@@ -320,17 +350,56 @@ export class GameManager {
     return { ok: true }
   }
 
+  // Deal the next community street during an all-in runout (called by server.ts with delays).
+  dealNextRunoutStreet(tableId: string): RunoutStreetResult {
+    const game = this.games.get(tableId)
+    if (!game?.handState) return { error: 'No active hand' }
+    const state = game.handState
+
+    // Settle any tip (usually zero during runout streets).
+    this.settleTipForRound(state)
+
+    // Reset round state.
+    for (const p of state.players) {
+      p.roundContribution = 0
+      if (p.status === 'active') p.hasActedThisRound = false
+    }
+    state.currentBet = 0
+    state.minRaise = state.bigBlind
+    state.voluntaryRaiseLevel = 0
+
+    if (!this.dealNextStreet(state)) {
+      // No more streets — hand ends.
+      const data = this.buildHandEndedData(state, game.handCount, 'showdown')
+      game.handState = null
+      return { ok: true, handEnded: true, data }
+    }
+
+    // Nobody acts during a runout — clear the actor so no client is prompted.
+    state.currentActorIndex = -1
+
+    return {
+      ok: true,
+      handEnded: false,
+      phase: state.phase,
+      communityCards: state.communityCards as Card[],
+    }
+  }
+
   private buildHandEndedData(
     state: HandState,
     handNumber: number,
     reason: 'all_folded' | 'showdown',
   ): HandEndedData {
+    // Settle any remaining tip before the hand ends.
+    this.settleTipForRound(state)
     return {
       reason,
       handNumber,
       startedAt: state.startedAt,
       communityCards: [...state.communityCards],
       pot: state.pot,
+      tipAmount: state.tipPool,
       players: state.players.map(p => ({
         playerId: p.playerId,
         username: p.username,
@@ -345,6 +414,19 @@ export class GameManager {
 
   // ── Private helpers ───────────────────────────────────────────────────────
 
+  // Settle the current voluntary raise level: if ≥ 2 players have contributed
+  // exactly the raise level, add 2% of (level × count) to tipPool.
+  // Must be called BEFORE the acting player's roundContribution is updated.
+  private settleTipForRound(state: HandState): void {
+    if (state.voluntaryRaiseLevel <= 0) return
+    const level = state.voluntaryRaiseLevel
+    const count = state.players.filter(p => p.roundContribution === level).length
+    if (count >= 2) {
+      state.tipPool += Math.floor(0.02 * level * count)
+    }
+    state.voluntaryRaiseLevel = 0
+  }
+
   private isBettingRoundComplete(state: HandState): boolean {
     const active = state.players.filter(p => p.status === 'active')
     if (active.length === 0) return true
@@ -353,20 +435,34 @@ export class GameManager {
     )
   }
 
-  // Advances through streets (looping when no active players remain, e.g. all-in runout).
-  // Returns false when the RIVER betting is complete → hand should end.
-  private advanceToNextRound(state: HandState): boolean {
-    while (this.isBettingRoundComplete(state)) {
-      for (const p of state.players) {
-        p.roundContribution = 0
-        if (p.status === 'active') p.hasActedThisRound = false
-      }
-      state.currentBet = 0
-      state.minRaise = state.bigBlind
+  // Single-step advance: settle tip, reset round, deal ONE next street.
+  // Returns:
+  //   false    → RIVER was the last street; caller should end the hand.
+  //   'runout' → next street dealt but fewer than 2 active players; server auto-deals the rest.
+  //   true     → next street dealt and at least 2 active players can bet.
+  private advanceToNextRound(state: HandState): boolean | 'runout' {
+    // Settle tip for the completed betting round.
+    this.settleTipForRound(state)
 
-      if (!this.dealNextStreet(state)) return false
+    // Reset per-round state.
+    for (const p of state.players) {
+      p.roundContribution = 0
+      if (p.status === 'active') p.hasActedThisRound = false
+    }
+    state.currentBet = 0
+    state.minRaise = state.bigBlind
+    state.voluntaryRaiseLevel = 0
 
-      this.setFirstPostFlopActor(state)
+    if (!this.dealNextStreet(state)) return false  // RIVER is the last street
+
+    this.setFirstPostFlopActor(state)
+
+    // Runout when 0 or 1 active player remains: no meaningful betting is possible.
+    // (A single active player has no opponent who can respond to a bet.)
+    const activeCnt = state.players.filter(p => p.status === 'active').length
+    if (activeCnt < 2) {
+      state.currentActorIndex = -1  // nobody should be prompted to act
+      return 'runout'
     }
     return true
   }
