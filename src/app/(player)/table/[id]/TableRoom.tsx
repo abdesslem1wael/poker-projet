@@ -1069,6 +1069,13 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const prevPhaseRef = useRef<PublicHandState['phase'] | null>(null)
   const prevShowdownFlightHandRef = useRef<number | null>(null)
 
+  // The static bet-pile chip stacks render from this map, not straight from
+  // hp.roundContribution — roundContribution still drives every value here, but a seat's
+  // pile is only deleted once its collect-to-pot flight has visually landed, so it can't
+  // pop out of existence the instant the server resets roundContribution to 0 for a new
+  // street (see collectBetPilesToPot below).
+  const [visiblePiles, setVisiblePiles] = useState<Map<number, number>>(new Map())
+
   const removeChipFlight = (id: string) => setChipFlights(prev => prev.filter(f => f.id !== id))
 
   const pulsePot = (delay: number) => {
@@ -1080,8 +1087,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
   // Sweep every seat's visible bet pile (captured in prevRoundContribRef) into the
   // center pot — fired once when a betting round ends (street change or hand end).
+  // The static piles keep rendering (from visiblePiles) until the flight lands, then
+  // get removed — so a street change always reads as "piles fly into the pot," never
+  // as "piles vanish, then a flight plays."
   const collectBetPilesToPot = () => {
     const collectFlights: ChipFlightData[] = []
+    const seatsToClear: Array<[seatNumber: number, amt: number]> = []
     for (const [seatNumber, amt] of prevRoundContribRef.current) {
       if (amt <= 0) continue
       const vs = toVisual(seatNumber, anchor, max)
@@ -1092,10 +1103,23 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         amount: amt,
         duration: COLLECT_CHIP_FLIGHT_MS,
       })
+      seatsToClear.push([seatNumber, amt])
     }
     if (collectFlights.length > 0) {
       setChipFlights(prev => [...prev, ...collectFlights])
       pulsePot(COLLECT_CHIP_FLIGHT_MS)
+      setTimeout(() => {
+        setVisiblePiles(prev => {
+          const next = new Map(prev)
+          // Only clear a seat if its pile still holds the amount we collected — a fast
+          // pre-action on the next street may already have set a fresh value for the
+          // same seat number, which must not get wiped out by this stale collection.
+          for (const [s, amt] of seatsToClear) {
+            if (next.get(s) === amt) next.delete(s)
+          }
+          return next
+        })
+      }, COLLECT_CHIP_FLIGHT_MS)
     }
   }
 
@@ -1121,6 +1145,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     if (prevContribHandNumberRef.current !== hand.handNumber) {
       // Fresh hand — nothing left over to collect (the previous hand's end already did it).
       prevRoundContribRef.current.clear()
+      setVisiblePiles(new Map())
       prevContribHandNumberRef.current = hand.handNumber
       prevPhaseRef.current = hand.phase
     } else if (prevPhaseRef.current !== hand.phase) {
@@ -1131,6 +1156,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     }
 
     const newFlights: ChipFlightData[] = []
+    const pileUpdates: Array<[number, number]> = []
     for (const p of hand.players) {
       const prevAmt = prevRoundContribRef.current.get(p.seatNumber) ?? 0
       const delta = p.roundContribution - prevAmt
@@ -1143,11 +1169,19 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           amount: delta,
           duration: ACTION_CHIP_FLIGHT_MS,
         })
+        pileUpdates.push([p.seatNumber, p.roundContribution])
       }
       prevRoundContribRef.current.set(p.seatNumber, p.roundContribution)
     }
+    if (pileUpdates.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setVisiblePiles(prev => {
+        const next = new Map(prev)
+        for (const [seat, amt] of pileUpdates) next.set(seat, amt)
+        return next
+      })
+    }
     if (newFlights.length === 0) return
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setChipFlights(prev => [...prev, ...newFlights])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hand, anchor, max, layoutPreview])
@@ -2185,6 +2219,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                 const isBB     = occ && hand?.bigBlindSeatNumber === seat.seatNumber
                 const folded   = hp?.playerPhase === 'folded'
                 const allIn    = hp?.playerPhase === 'all-in'
+                // Buffered copy of roundContribution — see visiblePiles for why the static
+                // pile can't read straight off hp.roundContribution. layoutPreview is a static
+                // mock with no socket-driven effect to populate visiblePiles, so it reads direct.
+                const betPile  = layoutPreview ? (hp?.roundContribution ?? 0) : (visiblePiles.get(seat.seatNumber) ?? 0)
                 const sdFolded = !hand && sdP?.hasFolded === true
                 const isWinner = !hand && !!showdownResult && !!seat.playerId &&
                   (showdownResult.pots[0]?.winners ?? []).includes(seat.playerId)
@@ -2199,8 +2237,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
                 return (
                   <div key={seat.seatNumber}>
-                    {/* Chip bet stack — hero bet is shown in the pod, opponents use floating chipPos */}
-                    {occ && hp && hp.roundContribution > 0 && vs !== 1 && (
+                    {/* Chip bet stack — hero bet is shown in the pod, opponents use floating chipPos.
+                        Driven by betPile (buffered), not hp directly, so it survives past hand-end
+                        (hp becomes undefined) for as long as the final collect-to-pot flight runs. */}
+                    {occ && betPile > 0 && vs !== 1 && (
                       <div className="tbl-bet-chip" style={{ ...chipPos(vs, max), ...mobileChipVars(vs, max), position: 'absolute', zIndex: 10, pointerEvents: 'none' }}>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
                           {showBlindLabels && isSB && (
@@ -2209,7 +2249,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                           {showBlindLabels && isBB && (
                             <span style={{ background: '#6d28d9', color: 'white', fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, letterSpacing: '0.04em' }}>BB</span>
                           )}
-                          <ChipStack amount={hp.roundContribution} />
+                          <ChipStack amount={betPile} />
                         </div>
                       </div>
                     )}
@@ -2404,7 +2444,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           flexShrink: 0,
         }}
       >
-        {hp && hp.roundContribution > 0 && (
+        {betPile > 0 && (
           <div
             className="tbl-hero-bet-stack"
             style={{
@@ -2446,7 +2486,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               </span>
             )}
 
-            <ChipStack amount={hp.roundContribution} />
+            <ChipStack amount={betPile} />
           </div>
         )}
 
