@@ -90,6 +90,7 @@ export type TableStatePayload = {
   smallBlind: number
   bigBlind: number
   maxPlayers: number
+  tableType: 'timer' | 'open'
   status: 'waiting' | 'active' | 'closed'
   seats: SeatInfo[]       // length === maxPlayers; null playerId means empty seat
   spectators: SpectatorInfo[]

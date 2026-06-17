@@ -33,6 +33,7 @@ export async function createTableAction(
   const name = (formData.get('name') as string).trim()
   const smallBlind = parseInt(formData.get('smallBlind') as string, 10)
   const maxPlayers = parseInt(formData.get('maxPlayers') as string, 10)
+  const tableType = formData.get('tableType') as string
 
   if (!name) return { error: 'Table name is required' }
   if (isNaN(smallBlind) || smallBlind <= 0) {
@@ -40,6 +41,9 @@ export async function createTableAction(
   }
   if (isNaN(maxPlayers) || maxPlayers < 2 || maxPlayers > 9) {
     return { error: 'Max players must be between 2 and 9' }
+  }
+  if (tableType !== 'timer' && tableType !== 'open') {
+    return { error: 'Table type must be either timer or open' }
   }
 
   const bigBlind = smallBlind * 2
@@ -50,6 +54,7 @@ export async function createTableAction(
     small_blind: smallBlind,
     big_blind: bigBlind,
     max_players: maxPlayers,
+    table_type: tableType,
     status: 'waiting',
     created_by: admin.id,
   })

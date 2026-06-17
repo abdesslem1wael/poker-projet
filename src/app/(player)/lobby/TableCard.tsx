@@ -11,6 +11,7 @@ type TableRow = {
   small_blind: number
   big_blind: number
   max_players: number
+  table_type: 'timer' | 'open'
   status: 'waiting' | 'active'
 }
 
@@ -78,7 +79,7 @@ export default function TableCard({ table }: { table: TableRow }) {
       </div>
 
       {/* Stats row */}
-      <div className="mb-4 grid grid-cols-2 gap-2 text-sm">
+      <div className="mb-4 grid grid-cols-3 gap-2 text-sm">
         <div className="rounded-lg bg-zinc-800/60 px-3 py-2.5">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Blinds</p>
           <p className="mt-0.5 font-bold tabular-nums text-zinc-200">
@@ -88,6 +89,12 @@ export default function TableCard({ table }: { table: TableRow }) {
         <div className="rounded-lg bg-zinc-800/60 px-3 py-2.5">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Max Seats</p>
           <p className="mt-0.5 font-bold text-zinc-200">{table.max_players}</p>
+        </div>
+        <div className="rounded-lg bg-zinc-800/60 px-3 py-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Type</p>
+          <p className="mt-0.5 font-bold text-zinc-200">
+            {table.table_type === 'open' ? 'Open' : 'Timer'}
+          </p>
         </div>
       </div>
 

@@ -14,6 +14,7 @@ export default function CreateTableForm() {
     undefined
   )
   const [smallBlindStr, setSmallBlindStr] = useState('25')
+  const [tableType, setTableType] = useState<'timer' | 'open'>('timer')
 
   const smallBlindNum = parseInt(smallBlindStr, 10)
   const bigBlindDisplay =
@@ -81,6 +82,41 @@ export default function CreateTableForm() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="space-y-1.5 sm:col-span-2">
+            <p className="block text-sm font-medium text-zinc-300">Table Type</p>
+            <input type="hidden" name="tableType" value={tableType} />
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setTableType('timer')}
+                className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                  tableType === 'timer'
+                    ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
+                    : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
+                }`}
+              >
+                <span className="block font-semibold">Timer</span>
+                <span className="block text-xs text-zinc-500">
+                  Players are locked in until the session timer ends or an admin kicks them.
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTableType('open')}
+                className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                  tableType === 'open'
+                    ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
+                    : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
+                }`}
+              >
+                <span className="block font-semibold">Open</span>
+                <span className="block text-xs text-zinc-500">
+                  Players can leave the table whenever they want.
+                </span>
+              </button>
+            </div>
           </div>
         </div>
 

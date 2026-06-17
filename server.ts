@@ -272,13 +272,15 @@ nextApp.prepare().then(() => {
 
     const { data: tableData } = await supabase
       .from('poker_tables')
-      .select('name, small_blind, big_blind, status')
+      .select('name, small_blind, big_blind, table_type, status')
       .eq('id', tableId)
       .single()
 
     if (!tableData || (tableData as { status: string }).status === 'closed') return 'failed'
 
-    const { name: tableName, small_blind, big_blind } = tableData as { name: string; small_blind: number; big_blind: number }
+    const { name: tableName, small_blind, big_blind, table_type } = tableData as {
+      name: string; small_blind: number; big_blind: number; table_type: 'timer' | 'open'
+    }
 
     const { data: playersData } = await supabase
       .from('table_players')
@@ -342,7 +344,7 @@ nextApp.prepare().then(() => {
 
     // Start the 1-hour session on the very first hand.
     if (!sm.isActive(tableId)) {
-      sm.startSession(tableId, tableName)
+      sm.startSession(tableId, tableName, table_type)
       emitSessionUpdate(tableId)
       console.log(`[session] started  table=${tableId}`)
     }
@@ -515,8 +517,8 @@ nextApp.prepare().then(() => {
 
     // ── leave_table ────────────────────────────────────────────────────────
     socket.on('leave_table', async ({ tableId }) => {
-      // Block voluntary leaves while the session is running.
-      if (sm.isActive(tableId) && !sm.isExpired(tableId) && socket.data.role !== 'admin') {
+      // Block voluntary leaves while the session is running — 'open' tables never lock.
+      if (sm.lockLeaving(tableId) && socket.data.role !== 'admin') {
         socket.emit('socket_error', { message: 'Session in progress — you cannot leave until the session ends.' })
         return
       }
@@ -712,7 +714,8 @@ nextApp.prepare().then(() => {
       for (const tableId of socket.data.joinedTables) {
         // Keep seat when session is running (player is expected to reconnect)
         // or when a hand is in progress (hand-end logic handles seat cleanup).
-        const sessionLocked = sm.isActive(tableId) && !sm.isExpired(tableId)
+        // 'open' tables never lock the seat this way.
+        const sessionLocked = sm.lockLeaving(tableId)
         if (!gm.hasActiveHand(tableId) && !sessionLocked) {
           await leaveTable(supabase, tableId, userId)
         }

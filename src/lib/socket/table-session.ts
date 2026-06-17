@@ -15,6 +15,7 @@ type TableRow = {
   small_blind: number
   big_blind: number
   max_players: number
+  table_type: 'timer' | 'open'
   status: string
 }
 
@@ -34,7 +35,7 @@ export async function getTableState(
 ): Promise<TableStatePayload | null> {
   const { data: tableData } = await supabase
     .from('poker_tables')
-    .select('id, name, small_blind, big_blind, max_players, status')
+    .select('id, name, small_blind, big_blind, max_players, table_type, status')
     .eq('id', tableId)
     .single()
 
@@ -92,6 +93,7 @@ export async function getTableState(
     smallBlind: table.small_blind,
     bigBlind: table.big_blind,
     maxPlayers: table.max_players,
+    tableType: table.table_type,
     status: table.status as TableStatePayload['status'],
     seats,
     spectators,

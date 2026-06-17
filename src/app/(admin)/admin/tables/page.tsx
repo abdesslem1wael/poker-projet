@@ -9,6 +9,7 @@ type TableRow = {
   small_blind: number
   big_blind: number
   max_players: number
+  table_type: 'timer' | 'open'
   status: 'waiting' | 'active' | 'closed'
   created_at: string
 }
@@ -22,12 +23,19 @@ const statusBadge: Record<TableRow['status'], string> = {
     'inline-flex items-center rounded-full bg-zinc-800/60 px-2.5 py-0.5 text-xs font-semibold text-zinc-500 border border-zinc-700/50',
 }
 
+const typeBadge: Record<TableRow['table_type'], string> = {
+  timer:
+    'inline-flex items-center rounded-full bg-sky-900/40 px-2.5 py-0.5 text-xs font-semibold text-sky-400 border border-sky-800/50',
+  open:
+    'inline-flex items-center rounded-full bg-violet-900/40 px-2.5 py-0.5 text-xs font-semibold text-violet-400 border border-violet-800/50',
+}
+
 export default async function AdminTablesPage() {
   const adminClient = createAdminClient()
 
   const { data } = await adminClient
     .from('poker_tables')
-    .select('id, name, small_blind, big_blind, max_players, status, created_at')
+    .select('id, name, small_blind, big_blind, max_players, table_type, status, created_at')
     .order('created_at', { ascending: false })
 
   const tables = (data as TableRow[] | null) ?? []
@@ -69,6 +77,7 @@ export default async function AdminTablesPage() {
                     <th className="px-5 py-3 text-left font-medium text-zinc-400">Name</th>
                     <th className="px-5 py-3 text-right font-medium text-zinc-400">Blinds</th>
                     <th className="px-5 py-3 text-right font-medium text-zinc-400">Max</th>
+                    <th className="px-5 py-3 text-left font-medium text-zinc-400">Type</th>
                     <th className="px-5 py-3 text-left font-medium text-zinc-400">Status</th>
                     <th className="px-5 py-3 text-left font-medium text-zinc-400">Created</th>
                     <th className="px-5 py-3 text-right font-medium text-zinc-400">Actions</th>
@@ -89,6 +98,9 @@ export default async function AdminTablesPage() {
                         </td>
                         <td className="px-5 py-3 text-right tabular-nums text-zinc-300">
                           {t.max_players}
+                        </td>
+                        <td className="px-5 py-3">
+                          <span className={typeBadge[t.table_type]}>{t.table_type}</span>
                         </td>
                         <td className="px-5 py-3">
                           <span className={statusBadge[t.status]}>{t.status}</span>

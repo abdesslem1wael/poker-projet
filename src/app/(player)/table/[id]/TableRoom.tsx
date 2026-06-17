@@ -120,6 +120,14 @@ function chipPos(vs: number, max: number): React.CSSProperties {
   }
 }
 
+// Plain {left, top} percentages for a seat — used as chip-flight endpoints (table-relative,
+// same coordinate space as seatPos/chipPos). Desktop-accurate; on the mobile-landscape preset
+// layout this is a close approximation since those positions are applied via CSS, not JS.
+function seatAnchorPos(vs: number, max: number): { left: string; top: string } {
+  const sp = seatPos(vs, max)
+  return { left: sp.left as string, top: sp.top as string }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Mobile-landscape seat presets — FIXED coordinates per table size (2-9
 // players), not the continuous oval math above. On a phone in landscape,
@@ -393,12 +401,28 @@ const TIMER_TOTAL = 60
 // ChipStack
 // ─────────────────────────────────────────────────────────────────────────────
 
-function chipColor(amount: number): string[] {
-  if (amount >= 10000) return ['#7c3aed', '#8b5cf6', '#a78bfa']
-  if (amount >= 1000)  return ['#dc2626', '#ef4444', '#f87171']
-  if (amount >= 500)   return ['#1d4ed8', '#2563eb', '#60a5fa']
-  if (amount >= 100)   return ['#059669', '#10b981', '#34d399']
-  return ['#92400e', '#d97706', '#fbbf24']
+// Real-casino chip color/value convention: white→red→blue→green→black→purple→yellow→orange
+// as the denomination climbs. Each tier carries a light/base/dark trio (for the face gradient)
+// plus an edge color used for the striped rim.
+type ChipPalette = { light: string; base: string; dark: string; edge: string }
+
+const CHIP_TIERS: { min: number; colors: ChipPalette }[] = [
+  { min: 0,     colors: { light: '#ffffff', base: '#f1f5f9', dark: '#cbd5e1', edge: '#1e293b' } },  // white
+  { min: 5,     colors: { light: '#f87171', base: '#dc2626', dark: '#7f1d1d', edge: '#fef2f2' } },  // red
+  { min: 10,    colors: { light: '#60a5fa', base: '#1d4ed8', dark: '#1e3a8a', edge: '#eff6ff' } },  // blue
+  { min: 25,    colors: { light: '#4ade80', base: '#16a34a', dark: '#14532d', edge: '#f0fdf4' } },  // green
+  { min: 100,   colors: { light: '#475569', base: '#1e293b', dark: '#020617', edge: '#fbbf24' } },  // black
+  { min: 500,   colors: { light: '#a78bfa', base: '#7c3aed', dark: '#4c1d95', edge: '#f5f3ff' } },  // purple
+  { min: 1000,  colors: { light: '#fde047', base: '#ca8a04', dark: '#713f12', edge: '#1e293b' } },  // yellow
+  { min: 5000,  colors: { light: '#fb923c', base: '#ea580c', dark: '#7c2d12', edge: '#fff7ed' } },  // orange
+]
+
+function chipColor(amount: number): ChipPalette {
+  let result = CHIP_TIERS[0].colors
+  for (const tier of CHIP_TIERS) {
+    if (amount >= tier.min) result = tier.colors
+  }
+  return result
 }
 
 // Compact chip label: 2.1M / 19.6M above 1M, 12k / 497k above 10k, 1.2k-style below that.
@@ -417,30 +441,100 @@ function formatChipAmount(amount: number): string {
   return `${amount}`
 }
 
-function ChipStack({ amount }: { amount: number }) {
-  const colors = chipColor(amount)
+// A single poker chip — striped edge (alternating segments) + a domed, gradient-shaded face.
+function PokerChip({ size, palette }: { size: number; palette: ChipPalette }) {
+  return (
+    <div style={{
+      position: 'relative', width: size, height: size, borderRadius: '50%',
+      background: `repeating-conic-gradient(${palette.edge} 0deg 22.5deg, ${palette.base} 22.5deg 45deg)`,
+      boxShadow: '0 1px 3px rgba(0,0,0,0.55)',
+    }}>
+      <div style={{
+        position: 'absolute', inset: Math.max(1, size * 0.16),
+        borderRadius: '50%',
+        background: `radial-gradient(circle at 35% 32%, ${palette.light}, ${palette.base} 60%, ${palette.dark})`,
+        border: '1px solid rgba(255,255,255,0.3)',
+      }} />
+    </div>
+  )
+}
+
+// Single decorative chip — used inline next to numeric stack/pot labels (symbolic, not a count).
+function MiniChip({ amount, size = 11 }: { amount: number; size?: number }) {
+  return <PokerChip size={size} palette={chipColor(amount)} />
+}
+
+function ChipStack({ amount, showLabel = true, chipSize = 15 }: { amount: number; showLabel?: boolean; chipSize?: number }) {
+  const palette = chipColor(amount)
   const layers = Math.min(5, Math.max(2, Math.floor(Math.log10(amount + 1))))
   return (
     <div className="flex flex-col items-center">
-      <div style={{ position: 'relative', width: 15, height: 15 + layers * 2 }}>
+      <div style={{ position: 'relative', width: chipSize, height: chipSize + layers * 2 }}>
         {Array.from({ length: layers }).map((_, i) => (
-          <span key={i} style={{
-            position: 'absolute', bottom: i * 2, left: 0,
-            width: 15, height: 15, borderRadius: '50%',
-            background: `radial-gradient(circle at 35% 35%, ${colors[Math.min(i, colors.length - 1)]}, ${colors[0]})`,
-            border: '1px solid rgba(255,255,255,0.25)',
-            boxShadow: i === 0 ? '0 2px 4px rgba(0,0,0,0.5)' : 'none',
-          }} />
+          <div key={i} style={{ position: 'absolute', bottom: i * 2, left: 0 }}>
+            <PokerChip size={chipSize} palette={palette} />
+          </div>
         ))}
       </div>
-      <span style={{
-        marginTop: 2,
-        background: 'rgba(0,0,0,0.8)',
-        color: '#fbbf24', fontSize: 8, fontWeight: 700,
-        padding: '1px 3px', borderRadius: 3, letterSpacing: '-0.3px', whiteSpace: 'nowrap',
-      }}>
-        {formatChipAmount(amount)}
-      </span>
+      {showLabel && (
+        <span style={{
+          marginTop: 2,
+          background: 'rgba(0,0,0,0.8)',
+          color: '#fbbf24', fontSize: 8, fontWeight: 700,
+          padding: '1px 3px', borderRadius: 3, letterSpacing: '-0.3px', whiteSpace: 'nowrap',
+        }}>
+          {formatChipAmount(amount)}
+        </span>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ChipFlight — a single chip stack animating from one table-relative position to
+// another (seat → pot for bets/blinds, pot → seat for winnings). Purely visual:
+// it never touches game state, just shows a flight then unmounts itself.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const POT_CENTER_POS = { left: '50%', top: '40%' }
+const ACTION_CHIP_FLIGHT_MS = 480   // blinds / bet / call / raise / all-in (spec: 350–600ms)
+const WINNER_CHIP_FLIGHT_MS = 850   // pot → winner seat(s) (spec: 700–1000ms)
+
+type ChipFlightData = {
+  id: string
+  from: { left: string; top: string }
+  to: { left: string; top: string }
+  amount: number
+  duration: number
+}
+
+function ChipFlight({ flight, onDone }: { flight: ChipFlightData; onDone: (id: string) => void }) {
+  const [stage, setStage] = useState<'start' | 'flying' | 'landed'>('start')
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setStage('flying'))
+    const landTimer = setTimeout(() => setStage('landed'), flight.duration)
+    const doneTimer = setTimeout(() => onDone(flight.id), flight.duration + 200)
+    return () => { cancelAnimationFrame(raf); clearTimeout(landTimer); clearTimeout(doneTimer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const pos = stage === 'start' ? flight.from : flight.to
+  const landed = stage === 'landed'
+
+  return (
+    <div style={{
+      position: 'absolute',
+      left: pos.left, top: pos.top,
+      transform: `translate(-50%,-50%) scale(${landed ? 0.5 : 1})`,
+      opacity: landed ? 0 : 1,
+      transition: stage === 'start'
+        ? 'none'
+        : `left ${flight.duration}ms cubic-bezier(.22,.61,.36,1), top ${flight.duration}ms cubic-bezier(.22,.61,.36,1), transform 200ms ease-in, opacity 200ms ease-in`,
+      zIndex: 45,
+      pointerEvents: 'none',
+    }}>
+      <ChipStack amount={flight.amount} chipSize={13} />
     </div>
   )
 }
@@ -555,7 +649,8 @@ function ShowdownBanner({
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <span style={{ fontSize: 15 }}>🏆</span>
         <span style={{ color: '#fde68a', fontWeight: 800, fontSize: 14 }}>{winnerLabel}</span>
-        <span style={{ color: '#4ade80', fontWeight: 700, fontSize: 13, background: 'rgba(74,222,128,0.1)', borderRadius: 6, padding: '1px 6px' }}>
+        <span style={{ color: '#4ade80', fontWeight: 700, fontSize: 13, background: 'rgba(74,222,128,0.1)', borderRadius: 6, padding: '1px 6px', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <MiniChip amount={winnerNet} size={11} />
           +{formatNumber(winnerNet)}
         </span>
       </div>
@@ -896,7 +991,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const seatedCnt  = state.seats.filter(s => s.playerId !== null).length
   const sessionActive  = sessionInfo != null && !sessionInfo.isExpired
   const sessionExpired = sessionInfo != null && sessionInfo.isExpired
-  const canLeave   = !sessionActive || isAdmin
+  const canLeave   = !sessionActive || isAdmin || state.tableType === 'open'
   const canStart   = myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired
 
   // Can I afford to call? If not, only all-in or fold is possible.
@@ -955,6 +1050,88 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     document.addEventListener('fullscreenchange', handler)
     return () => document.removeEventListener('fullscreenchange', handler)
   }, [])
+
+  // ── Chip flight animations (visual only — never touches game state) ────────
+  const [chipFlights, setChipFlights] = useState<ChipFlightData[]>([])
+  const [potPulse, setPotPulse] = useState(false)
+  const chipFlightIdRef = useRef(0)
+  const prevRoundContribRef = useRef<Map<number, number>>(new Map())
+  const prevContribHandNumberRef = useRef<number | null>(null)
+  const prevShowdownFlightHandRef = useRef<number | null>(null)
+
+  const removeChipFlight = (id: string) => setChipFlights(prev => prev.filter(f => f.id !== id))
+
+  // Blinds / bet / call / raise / all-in — detected as a rise in a seat's roundContribution.
+  // This single delta check covers every chip-producing action uniformly: blinds are simply
+  // the first contribution of a fresh hand, the rest are voluntary actions.
+  useEffect(() => {
+    if (layoutPreview) return
+    if (!hand) {
+      prevRoundContribRef.current.clear()
+      prevContribHandNumberRef.current = null
+      return
+    }
+    if (prevContribHandNumberRef.current !== hand.handNumber) {
+      prevRoundContribRef.current.clear()
+      prevContribHandNumberRef.current = hand.handNumber
+    }
+    const newFlights: ChipFlightData[] = []
+    for (const p of hand.players) {
+      const prevAmt = prevRoundContribRef.current.get(p.seatNumber) ?? 0
+      const delta = p.roundContribution - prevAmt
+      if (delta > 0) {
+        const vs = toVisual(p.seatNumber, anchor, max)
+        newFlights.push({
+          id: `cf${chipFlightIdRef.current++}`,
+          from: seatAnchorPos(vs, max),
+          to: POT_CENTER_POS,
+          amount: delta,
+          duration: ACTION_CHIP_FLIGHT_MS,
+        })
+      }
+      prevRoundContribRef.current.set(p.seatNumber, p.roundContribution)
+    }
+    if (newFlights.length === 0) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setChipFlights(prev => [...prev, ...newFlights])
+    // Pot "collection" pulse — fires as the chips land, confirming they joined the pile.
+    const pulseTimer = setTimeout(() => {
+      setPotPulse(true)
+      setTimeout(() => setPotPulse(false), 260)
+    }, ACTION_CHIP_FLIGHT_MS)
+    return () => clearTimeout(pulseTimer)
+  }, [hand, anchor, max, layoutPreview])
+
+  // Pot → winner seat(s) when a hand ends. Split pots fan out to every winner of that pot;
+  // side pots (showdown.pots[1+]) animate independently in case they have different winners.
+  useEffect(() => {
+    if (layoutPreview) return
+    if (!showdownResult) return
+    if (prevShowdownFlightHandRef.current === showdownResult.handNumber) return
+    prevShowdownFlightHandRef.current = showdownResult.handNumber
+
+    const newFlights: ChipFlightData[] = []
+    for (const pot of showdownResult.pots) {
+      if (pot.winners.length === 0) continue
+      const share = Math.floor(pot.amount / pot.winners.length)
+      for (const winnerId of pot.winners) {
+        const seatNumber = showdownResult.players.find(pl => pl.playerId === winnerId)?.seatNumber
+        if (seatNumber == null) continue
+        const vs = toVisual(seatNumber, anchor, max)
+        newFlights.push({
+          id: `wf${chipFlightIdRef.current++}`,
+          from: POT_CENTER_POS,
+          to: seatAnchorPos(vs, max),
+          amount: share,
+          duration: WINNER_CHIP_FLIGHT_MS,
+        })
+      }
+    }
+    if (newFlights.length > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setChipFlights(prev => [...prev, ...newFlights])
+    }
+  }, [showdownResult, anchor, max, layoutPreview])
 
   // Auto-scroll chat to the latest message
   useEffect(() => {
@@ -1727,10 +1904,14 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         </div>
       )}
 
-      {/* ── Table chat — fixed floating panel, collapsible via header button ─ */}
+      {/* ── Table chat — fixed floating panel, collapsible via header button.
+          Anchored on the LEFT: the right side is already claimed by the
+          "previous hand" panel (zIndex 600) and the dealer tip modal
+          (zIndex 900), both of which would otherwise sit on top of chat
+          and swallow its clicks. ──────────────────────────────────────── */}
       {chatOpen && (
         <div className="tbl-chat-panel" style={{
-          position: 'fixed', top: 52, right: 12, bottom: 100, zIndex: 550,
+          position: 'fixed', top: 52, left: 12, bottom: 100, zIndex: 550,
           width: 260, display: 'flex', flexDirection: 'column',
           background: 'linear-gradient(145deg, #0d1929, #080f1d)',
           border: '1px solid rgba(201,168,76,0.28)',
@@ -1886,11 +2067,13 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         background: 'rgba(0,0,0,0.72)', border: '1px solid rgba(201,168,76,0.3)',
                         borderRadius: 14, padding: '3px 12px',
                         backdropFilter: 'blur(6px)',
-                        transform: 'translateY(16px)'
+                        transform: 'translateY(16px)',
+                        animation: potPulse ? 'pot-pulse 0.3s ease-out' : 'none',
                       }}>
                         <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.1em', color: 'rgba(245,236,215,0.45)' }}>
                           POT
                         </span>
+                        {hand.pot > 0 && <MiniChip amount={hand.pot} size={13} />}
                         <div className="tbl-pot-amount" style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 12, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.5px' }}>
                           {formatNumber(hand.pot)}
                         </div>
@@ -2116,7 +2299,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             <div className="tbl-seat-pill-name" style={{ fontSize: 9, letterSpacing: '1.2px', textTransform: 'uppercase', color: isMe ? '#c9a84c' : 'rgba(245,236,215,0.5)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
                               {displayName}
                             </div>
-                            <div className="tbl-seat-pill-stack" style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 12, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.3px' }}>
+                            <div className="tbl-seat-pill-stack" style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 12, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.3px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
+                              <MiniChip amount={hp?.stack ?? sdP?.finalStack ?? 0} size={10} />
                               {stackDisplay}
                             </div>
                             {pillAction && (
@@ -2425,6 +2609,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                 )
               })}
 
+              {/* Chip flight overlay — purely visual, sits above seat pods and bet stacks */}
+              {chipFlights.map(f => (
+                <ChipFlight key={f.id} flight={f} onDone={removeChipFlight} />
+              ))}
+
             </div>
           </div>
         </div>
@@ -2456,6 +2645,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         <style>{`
           @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
           @keyframes card-deal-in{from{opacity:0;transform:translateY(-16px) scale(0.84) rotate(-5deg)}to{opacity:1;transform:translateY(0) scale(1) rotate(0deg)}}
+          @keyframes pot-pulse{0%{transform:translateY(16px) scale(1)}45%{transform:translateY(16px) scale(1.14)}100%{transform:translateY(16px) scale(1)}}
           .ap-range{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;outline:none;cursor:pointer;}
           .ap-range::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
           .ap-range::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}

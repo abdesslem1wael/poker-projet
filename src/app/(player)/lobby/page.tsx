@@ -12,6 +12,7 @@ type TableRow = {
   small_blind: number
   big_blind: number
   max_players: number
+  table_type: 'timer' | 'open'
   status: 'waiting' | 'active'
 }
 
@@ -39,7 +40,7 @@ export default async function LobbyPage() {
     supabase.from('profiles').select('username, role, must_change_password').eq('id', user.id).single(),
     supabase.from('wallets').select('chips').eq('user_id', user.id).single(),
     supabase.from('poker_tables')
-      .select('id, name, small_blind, big_blind, max_players, status')
+      .select('id, name, small_blind, big_blind, max_players, table_type, status')
       .in('status', ['waiting', 'active'])
       .order('created_at', { ascending: false }),
   ])
