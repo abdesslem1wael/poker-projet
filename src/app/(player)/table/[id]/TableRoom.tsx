@@ -51,7 +51,15 @@ const CHAT_HISTORY_LIMIT = 50
 const SUIT_SYM: Record<string, string> = {
   clubs: '♣', diamonds: '♦', hearts: '♥', spades: '♠',
 }
-const RED_SUITS = new Set(['diamonds', 'hearts'])
+// Four-color deck: the traditional two-color (black/red) scheme makes spades
+// indistinguishable from clubs, and hearts from diamonds, at a glance — especially
+// at the small card sizes used for opponents. Each suit gets its own color instead.
+const SUIT_COLOR: Record<string, string> = {
+  spades:   '#0f172a',  // black
+  clubs:    '#15803d',  // green
+  hearts:   '#dc2626',  // red
+  diamonds: '#2563eb',  // blue
+}
 
 function formatNumber(n: number): string {
   return n.toLocaleString('en-US')
@@ -291,9 +299,8 @@ const CARD_DIMS: Record<CardSize, {
 }
 
 function PlayingCard({ c, size }: { c: Card; size: CardSize }) {
-  const red = RED_SUITS.has(c.suit)
   const sym = SUIT_SYM[c.suit]
-  const color = red ? '#dc2626' : '#111827'
+  const color = SUIT_COLOR[c.suit]
   const d = CARD_DIMS[size]
   const isFace = ['J', 'Q', 'K', 'A'].includes(c.rank)
   const pips = PIP_POSITIONS[c.rank]
@@ -304,7 +311,7 @@ function PlayingCard({ c, size }: { c: Card; size: CardSize }) {
         width: d.w, height: d.h, position: 'relative', flexShrink: 0,
         background: 'white',
         borderRadius: d.r,
-        border: `1px solid ${red ? '#fca5a5' : '#d1d5db'}`,
+        border: '1px solid #d1d5db',
         boxShadow: '0 2px 6px rgba(0,0,0,0.35), 0 0 0 0.5px rgba(0,0,0,0.1)',
         overflow: 'hidden',
         userSelect: 'none',
@@ -508,6 +515,7 @@ const POT_CENTER_POS = { left: '50%', top: '40%' }
 const ACTION_CHIP_FLIGHT_MS  = 380   // seat → in-front-of-seat: blinds/bet/call/raise/all-in (spec: 350–600ms)
 const COLLECT_CHIP_FLIGHT_MS = 520   // in-front-of-seat → pot, when the betting round ends (spec: 350–600ms)
 const WINNER_CHIP_FLIGHT_MS  = 850   // pot → winner seat(s) (spec: 700–1000ms)
+const WINNER_FLIGHT_DELAY_MS = 3500  // dwell on showdown cards before the pot flies to the winner
 
 type ChipFlightData = {
   id: string
@@ -1186,36 +1194,45 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hand, anchor, max, layoutPreview])
 
-  // Pot → winner seat(s) when a hand ends. Split pots fan out to every winner of that pot;
-  // side pots (showdown.pots[1+]) animate independently in case they have different winners.
+  // Pot → winner seat(s) when a hand ends. Held back by WINNER_FLIGHT_DELAY_MS so the
+  // winner/loser cards get a clear dwell on screen before the pot moves — otherwise the
+  // chips would fly the instant showdown_result lands, before anyone can read the hands.
+  // anchor/max are captured at schedule time (not re-read via the dependency array) so a
+  // resize mid-dwell can't cancel-and-skip the still-pending flight for this hand.
   useEffect(() => {
     if (layoutPreview) return
     if (!showdownResult) return
     if (prevShowdownFlightHandRef.current === showdownResult.handNumber) return
     prevShowdownFlightHandRef.current = showdownResult.handNumber
 
-    const newFlights: ChipFlightData[] = []
-    for (const pot of showdownResult.pots) {
-      if (pot.winners.length === 0) continue
-      const share = Math.floor(pot.amount / pot.winners.length)
-      for (const winnerId of pot.winners) {
-        const seatNumber = showdownResult.players.find(pl => pl.playerId === winnerId)?.seatNumber
-        if (seatNumber == null) continue
-        const vs = toVisual(seatNumber, anchor, max)
-        newFlights.push({
-          id: `wf${chipFlightIdRef.current++}`,
-          from: POT_CENTER_POS,
-          to: seatAnchorPos(vs, max),
-          amount: share,
-          duration: WINNER_CHIP_FLIGHT_MS,
-        })
+    const sd = showdownResult
+    const a = anchor
+    const m = max
+    const timer = setTimeout(() => {
+      const newFlights: ChipFlightData[] = []
+      for (const pot of sd.pots) {
+        if (pot.winners.length === 0) continue
+        const share = Math.floor(pot.amount / pot.winners.length)
+        for (const winnerId of pot.winners) {
+          const seatNumber = sd.players.find(pl => pl.playerId === winnerId)?.seatNumber
+          if (seatNumber == null) continue
+          const vs = toVisual(seatNumber, a, m)
+          newFlights.push({
+            id: `wf${chipFlightIdRef.current++}`,
+            from: POT_CENTER_POS,
+            to: seatAnchorPos(vs, m),
+            amount: share,
+            duration: WINNER_CHIP_FLIGHT_MS,
+          })
+        }
       }
-    }
-    if (newFlights.length > 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setChipFlights(prev => [...prev, ...newFlights])
-    }
-  }, [showdownResult, anchor, max, layoutPreview])
+      if (newFlights.length > 0) setChipFlights(prev => [...prev, ...newFlights])
+    }, WINNER_FLIGHT_DELAY_MS)
+
+    return () => clearTimeout(timer)
+    // anchor/max intentionally excluded — see comment above the effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showdownResult, layoutPreview])
 
   // Auto-scroll chat to the latest message
   useEffect(() => {

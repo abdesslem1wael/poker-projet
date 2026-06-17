@@ -248,7 +248,10 @@ nextApp.prepare().then(() => {
   }
 
   // ── Auto-start next hand ───────────────────────────────────────────────────
-  const AUTO_START_DELAY_MS = 5_000
+  // Long enough for the showdown cards to be readable and for the pot → winner
+  // chip flight (which the client delays a few seconds after showdown_result,
+  // see WINNER_FLIGHT_DELAY_MS in TableRoom.tsx) to land before the felt resets.
+  const AUTO_START_DELAY_MS = 7_000
   const autoStartTimers = new Map<string, NodeJS.Timeout>()
 
   function emitSessionUpdate(tableId: string): void {
