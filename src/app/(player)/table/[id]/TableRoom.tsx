@@ -128,6 +128,13 @@ function seatAnchorPos(vs: number, max: number): { left: string; top: string } {
   return { left: sp.left as string, top: sp.top as string }
 }
 
+// Same idea, but for the betting-line spot in front of a seat — where the static bet-chip
+// stack already renders. Chip flights land exactly here so they hand off seamlessly.
+function chipPosAnchor(vs: number, max: number): { left: string; top: string } {
+  const cp = chipPos(vs, max)
+  return { left: cp.left as string, top: cp.top as string }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Mobile-landscape seat presets — FIXED coordinates per table size (2-9
 // players), not the continuous oval math above. On a phone in landscape,
@@ -492,13 +499,15 @@ function ChipStack({ amount, showLabel = true, chipSize = 15 }: { amount: number
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChipFlight — a single chip stack animating from one table-relative position to
-// another (seat → pot for bets/blinds, pot → seat for winnings). Purely visual:
-// it never touches game state, just shows a flight then unmounts itself.
+// another. Three legs: seat → in-front-of-seat (bets/blinds), in-front-of-seat → pot
+// (round-end collection), pot → seat (winnings). Purely visual: it never touches
+// game state, just shows a flight then unmounts itself.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const POT_CENTER_POS = { left: '50%', top: '40%' }
-const ACTION_CHIP_FLIGHT_MS = 480   // blinds / bet / call / raise / all-in (spec: 350–600ms)
-const WINNER_CHIP_FLIGHT_MS = 850   // pot → winner seat(s) (spec: 700–1000ms)
+const ACTION_CHIP_FLIGHT_MS  = 380   // seat → in-front-of-seat: blinds/bet/call/raise/all-in (spec: 350–600ms)
+const COLLECT_CHIP_FLIGHT_MS = 520   // in-front-of-seat → pot, when the betting round ends (spec: 350–600ms)
+const WINNER_CHIP_FLIGHT_MS  = 850   // pot → winner seat(s) (spec: 700–1000ms)
 
 type ChipFlightData = {
   id: string
@@ -1057,24 +1066,70 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const chipFlightIdRef = useRef(0)
   const prevRoundContribRef = useRef<Map<number, number>>(new Map())
   const prevContribHandNumberRef = useRef<number | null>(null)
+  const prevPhaseRef = useRef<PublicHandState['phase'] | null>(null)
   const prevShowdownFlightHandRef = useRef<number | null>(null)
 
   const removeChipFlight = (id: string) => setChipFlights(prev => prev.filter(f => f.id !== id))
 
-  // Blinds / bet / call / raise / all-in — detected as a rise in a seat's roundContribution.
-  // This single delta check covers every chip-producing action uniformly: blinds are simply
-  // the first contribution of a fresh hand, the rest are voluntary actions.
+  const pulsePot = (delay: number) => {
+    setTimeout(() => {
+      setPotPulse(true)
+      setTimeout(() => setPotPulse(false), 260)
+    }, delay)
+  }
+
+  // Sweep every seat's visible bet pile (captured in prevRoundContribRef) into the
+  // center pot — fired once when a betting round ends (street change or hand end).
+  const collectBetPilesToPot = () => {
+    const collectFlights: ChipFlightData[] = []
+    for (const [seatNumber, amt] of prevRoundContribRef.current) {
+      if (amt <= 0) continue
+      const vs = toVisual(seatNumber, anchor, max)
+      collectFlights.push({
+        id: `pf${chipFlightIdRef.current++}`,
+        from: chipPosAnchor(vs, max),
+        to: POT_CENTER_POS,
+        amount: amt,
+        duration: COLLECT_CHIP_FLIGHT_MS,
+      })
+    }
+    if (collectFlights.length > 0) {
+      setChipFlights(prev => [...prev, ...collectFlights])
+      pulsePot(COLLECT_CHIP_FLIGHT_MS)
+    }
+  }
+
+  // Blinds / bet / call / raise / all-in land in front of the player's own seat (a small
+  // bet pile) rather than the pot — detected as a rise in a seat's roundContribution, which
+  // uniformly covers every chip-producing action (blinds are just the first contribution of
+  // a fresh hand). Those piles only sweep into the pot once the betting round ends.
   useEffect(() => {
     if (layoutPreview) return
+
     if (!hand) {
+      // Hand over — collect whatever was still sitting in front of players (the final
+      // street's bets) before the showdown pot→winner flight runs.
+      if (prevContribHandNumberRef.current !== null) {
+        collectBetPilesToPot()
+      }
       prevRoundContribRef.current.clear()
       prevContribHandNumberRef.current = null
+      prevPhaseRef.current = null
       return
     }
+
     if (prevContribHandNumberRef.current !== hand.handNumber) {
+      // Fresh hand — nothing left over to collect (the previous hand's end already did it).
       prevRoundContribRef.current.clear()
       prevContribHandNumberRef.current = hand.handNumber
+      prevPhaseRef.current = hand.phase
+    } else if (prevPhaseRef.current !== hand.phase) {
+      // Street advanced within the same hand — sweep last street's bet piles into the pot.
+      collectBetPilesToPot()
+      prevRoundContribRef.current.clear()
+      prevPhaseRef.current = hand.phase
     }
+
     const newFlights: ChipFlightData[] = []
     for (const p of hand.players) {
       const prevAmt = prevRoundContribRef.current.get(p.seatNumber) ?? 0
@@ -1084,7 +1139,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         newFlights.push({
           id: `cf${chipFlightIdRef.current++}`,
           from: seatAnchorPos(vs, max),
-          to: POT_CENTER_POS,
+          to: chipPosAnchor(vs, max),
           amount: delta,
           duration: ACTION_CHIP_FLIGHT_MS,
         })
@@ -1094,12 +1149,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     if (newFlights.length === 0) return
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setChipFlights(prev => [...prev, ...newFlights])
-    // Pot "collection" pulse — fires as the chips land, confirming they joined the pile.
-    const pulseTimer = setTimeout(() => {
-      setPotPulse(true)
-      setTimeout(() => setPotPulse(false), 260)
-    }, ACTION_CHIP_FLIGHT_MS)
-    return () => clearTimeout(pulseTimer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hand, anchor, max, layoutPreview])
 
   // Pot → winner seat(s) when a hand ends. Split pots fan out to every winner of that pot;
