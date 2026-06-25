@@ -244,21 +244,31 @@ nextApp.prepare().then(() => {
       console.error('[game] Failed to persist hand result:', err)
     }
 
-    // Demote broke players immediately using the showdown result — never rely on
-    // the wallet re-read in doStartHand, which would miss a failed wallet write.
+    // Kick broke players off the table immediately using the showdown result —
+    // never rely on the wallet re-read in doStartHand, which would miss a failed
+    // wallet write. Kicked players must be re-added chips by an admin before they
+    // can rejoin via the normal Join Table flow.
     const brokePlayers = showdown.players.filter(p => p.finalStack === 0)
     if (brokePlayers.length > 0) {
       await Promise.all(brokePlayers.map(p =>
         supabase
           .from('table_players')
-          .update({ status: 'spectating', seat_number: null })
+          .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
           .eq('table_id', tableId)
           .eq('player_id', p.playerId)
-          .eq('status', 'seated')
+          .neq('status', 'left')
       ))
-      console.log(`[game] demoted broke players: ${brokePlayers.map(p => p.username).join(', ')}  table=${tableId}`)
-      const updatedState = await buildTableState(supabase, tableId)
-      if (updatedState) io.to(`table:${tableId}`).emit('table_state', updatedState)
+      console.log(`[game] kicked broke players: ${brokePlayers.map(p => p.username).join(', ')}  table=${tableId}`)
+
+      // Notify each broke player's sockets so their UI redirects away.
+      const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
+      for (const s of roomSockets) {
+        if (brokePlayers.some(p => p.playerId === s.data.userId)) {
+          s.emit('kicked_from_table', { tableId })
+          s.data.seatedAtTables.delete(tableId)
+          s.leave(`table:${tableId}`)
+        }
+      }
     }
 
     io.to(`table:${tableId}`).emit('showdown_result', showdown)
@@ -329,38 +339,9 @@ nextApp.prepare().then(() => {
       username: usernameMap.get(r.player_id) ?? 'Unknown',
     }))
 
-    // ── Remove zero-chip players before the hand starts ─────────────────────
-    const { data: walletData } = await supabase
-      .from('wallets')
-      .select('user_id, chips')
-      .in('user_id', allSeated.map(p => p.playerId))
+    if (allSeated.length < 2) return 'too_few'
 
-    const walletChips = new Map<string, number>(
-      ((walletData as Array<{ user_id: string; chips: number }> | null) ?? [])
-        .map(w => [w.user_id, w.chips])
-    )
-
-    const broke = allSeated.filter(p => (walletChips.get(p.playerId) ?? 0) === 0)
-    const seatedPlayers = allSeated.filter(p => (walletChips.get(p.playerId) ?? 0) > 0)
-
-    if (broke.length > 0) {
-      await Promise.all(broke.map(p =>
-        supabase
-          .from('table_players')
-          .update({ status: 'spectating', seat_number: null })
-          .eq('table_id', tableId)
-          .eq('player_id', p.playerId)
-          .eq('status', 'seated')
-      ))
-      console.log(`[game] demoted broke players to spectating: ${broke.map(p => p.username).join(', ')}  table=${tableId}`)
-      // Broadcast updated seating so clients see the change before cards fly.
-      const updated = await buildTableState(supabase, tableId)
-      if (updated) io.to(`table:${tableId}`).emit('table_state', updated)
-    }
-
-    if (seatedPlayers.length < 2) return 'too_few'
-
-    const result = await gm.startHand(tableId, seatedPlayers, supabase, small_blind, big_blind)
+    const result = await gm.startHand(tableId, allSeated, supabase, small_blind, big_blind)
     if ('error' in result) return 'failed'
 
     // Start the 1-hour session on the very first hand.
