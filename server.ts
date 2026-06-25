@@ -243,6 +243,24 @@ nextApp.prepare().then(() => {
     } catch (err) {
       console.error('[game] Failed to persist hand result:', err)
     }
+
+    // Demote broke players immediately using the showdown result — never rely on
+    // the wallet re-read in doStartHand, which would miss a failed wallet write.
+    const brokePlayers = showdown.players.filter(p => p.finalStack === 0)
+    if (brokePlayers.length > 0) {
+      await Promise.all(brokePlayers.map(p =>
+        supabase
+          .from('table_players')
+          .update({ status: 'spectating', seat_number: null })
+          .eq('table_id', tableId)
+          .eq('player_id', p.playerId)
+          .eq('status', 'seated')
+      ))
+      console.log(`[game] demoted broke players: ${brokePlayers.map(p => p.username).join(', ')}  table=${tableId}`)
+      const updatedState = await buildTableState(supabase, tableId)
+      if (updatedState) io.to(`table:${tableId}`).emit('table_state', updatedState)
+    }
+
     io.to(`table:${tableId}`).emit('showdown_result', showdown)
     scheduleAutoStart(tableId)
   }
