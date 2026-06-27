@@ -11,6 +11,7 @@ import {
   joinTable,
   spectateTable,
   leaveTable,
+  cleanupTableSeats,
 } from './src/lib/socket/table-session'
 import { GameManager } from './src/lib/socket/game-manager'
 import { SessionManager } from './src/lib/socket/session-manager'
@@ -375,8 +376,12 @@ nextApp.prepare().then(() => {
 
     let rows: typeof allSeatedRows
 
-    if (table_type === 'open') {
-      // Open tables: only deal to connected players; mark any stale seats as left.
+    if (table_type === 'open' || !sm.isActive(tableId)) {
+      // Open tables: always filter to connected players only.
+      // Timer tables with no active session (first hand or after server restart):
+      // also filter — ghost seats from a dead session must not be dealt in.
+      // Once a session is running, timer tables keep ALL seated players (even
+      // disconnected ones — they are auto-acted via handleTurnStart).
       const preHandSockets = await io.in(`table:${tableId}`).fetchSockets()
       const connectedUserIds = new Set(preHandSockets.map(s => s.data.userId))
 
@@ -384,11 +389,11 @@ nextApp.prepare().then(() => {
       rows = allSeatedRows.filter(r => connectedUserIds.has(r.player_id))
 
       if (staleRows.length > 0) {
-        console.log(`[game] removing stale open-table seats  table=${tableId} count=${staleRows.length}`)
+        console.log(`[game] removing stale seats before hand  table=${tableId} count=${staleRows.length} type=${table_type}`)
         await Promise.all(staleRows.map(r =>
           supabase
             .from('table_players')
-            .update({ status: 'left', left_at: new Date().toISOString() })
+            .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
             .eq('table_id', tableId)
             .eq('player_id', r.player_id)
             .neq('status', 'left')
@@ -400,7 +405,7 @@ nextApp.prepare().then(() => {
         }
       }
     } else {
-      // Timer tables: include all seated players regardless of connection status.
+      // Active timer-table session: include all seated players regardless of connection.
       // Disconnected players will be auto-acted via handleTurnStart.
       rows = allSeatedRows
     }
@@ -487,6 +492,38 @@ nextApp.prepare().then(() => {
     autoStartTimers.set(tableId, t)
   }
 
+  // ── Stale-seat cleanup ────────────────────────────────────────────────────
+  // Marks seated rows as left for any player with no live socket in the table room.
+  // Called before join and before starting the first hand of a session, so ghost
+  // players from a previous server run are evicted before they can affect state.
+  async function cleanupStaleSeats(tableId: string): Promise<void> {
+    const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
+    const connectedUserIds = new Set(roomSockets.map(s => s.data.userId))
+
+    const { data: seatedRows } = await supabase
+      .from('table_players')
+      .select('id, player_id, seat_number')
+      .eq('table_id', tableId)
+      .eq('status', 'seated')
+
+    const stale = (
+      (seatedRows as Array<{ id: string; player_id: string; seat_number: number | null }> | null) ?? []
+    ).filter(r => !connectedUserIds.has(r.player_id))
+
+    if (stale.length === 0) return
+
+    console.log(`[cleanup] removing ${stale.length} stale seats (no live socket)  table=${tableId}  players=${stale.map(r => r.player_id).join(',')}`)
+    await Promise.all(stale.map(r =>
+      supabase
+        .from('table_players')
+        .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
+        .eq('id', r.id)
+    ))
+
+    // DB-level dedup safety net: any constraint-surviving duplicates.
+    await cleanupTableSeats(supabase, tableId)
+  }
+
   // ── Auth middleware ────────────────────────────────────────────────────────
   io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token as string | undefined
@@ -539,6 +576,12 @@ nextApp.prepare().then(() => {
 
     // ── join_table ─────────────────────────────────────────────────────────
     socket.on('join_table', async ({ tableId }) => {
+      // When no session is active, evict ghost seats before reserving a new one.
+      // This catches stale rows left behind by a server restart or crash.
+      if (!sm.isActive(tableId)) {
+        await cleanupStaleSeats(tableId)
+      }
+
       const result = await joinTable(supabase, tableId, userId)
 
       if ('error' in result) {
