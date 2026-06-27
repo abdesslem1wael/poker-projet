@@ -982,6 +982,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const prevHandNumberRef  = useRef<number | null>(initialState.handState?.handNumber ?? null)
   const chatOpenRef        = useRef(false)
   const chatScrollRef      = useRef<HTMLDivElement | null>(null)
+  // Tracks whether the current user was seated on the last table_state — used to detect
+  // the seated→spectating transition so outOfChipsMsg only fires on a real demotion.
+  const prevSeatedRef      = useRef(myStatus === 'seated')
 
   // ── Derived values ──────────────────────────────────────────────────────────
   mutedRef.current = muted
@@ -994,7 +997,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
   const hand: PublicHandState | null = layoutPreview ? layoutPreview.hand : state.handState
   const max    = layoutPreview ? LAYOUT_PREVIEW_SEAT_COUNT : state.maxPlayers
-  const anchor = layoutPreview ? 1 : (mySeatNumber ?? 1)
+  // Derive anchor from live seat state so the current player is always at visual
+  // seat 1 (bottom-center), even if the mySeatNumber prop is stale or was null.
+  const heroSeatNumber = layoutPreview ? null : state.seats.find(s => s.playerId === currentUserId)?.seatNumber
+  const anchor = layoutPreview ? 1 : (heroSeatNumber ?? mySeatNumber ?? 1)
   const effectiveHoleCards = layoutPreview ? layoutPreview.myHoleCards : myHoleCards
   const effectiveDealtSeats = layoutPreview ? new Set(layoutPreview.seats.map(s => s.seatNumber)) : dealtSeatNumbers
 
@@ -1294,12 +1300,19 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           setVisibleCommunityCount(0)
         }
 
-        // Detect demotion to spectating due to zero chips
+        // Detect demotion to spectating due to zero chips — only fire the message
+        // on the transition from seated to spectating, never for players who were
+        // already spectating when they loaded (or on repeated table_state events).
         const nowSpectating = p.spectators.some(s => s.playerId === currentUserId)
         const nowSeated = p.seats.some(s => s.playerId === currentUserId)
-        if (nowSpectating && !nowSeated) {
+        if (nowSeated) {
+          prevSeatedRef.current = true
+        } else if (nowSpectating) {
+          if (prevSeatedRef.current) {
+            setOutOfChipsMsg(true)
+          }
+          prevSeatedRef.current = false
           setMyCurrentStatus('spectating')
-          setOutOfChipsMsg(true)
         }
 
         // Animate opponent card backs when a new hand starts
