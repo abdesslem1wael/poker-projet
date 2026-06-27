@@ -19,6 +19,7 @@ export default function TableCard({ table, canJoin = true }: { table: TableRow; 
   const router = useRouter()
   const [loading, setLoading] = useState<'join' | 'spectate' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [showJoinScreen, setShowJoinScreen] = useState(false)
 
   function withListeners(socket: AppSocket, tableId: string, onSuccess: () => void) {
     let settled = false
@@ -46,10 +47,34 @@ export default function TableCard({ table, canJoin = true }: { table: TableRow; 
   }
 
   function handleJoin() {
-    setLoading('join'); setError(null)
+    setLoading('join'); setError(null); setShowJoinScreen(true)
+    const minWait = new Promise<void>(r => setTimeout(r, 2000))
+
     getSocket().then((socket) => {
-      withListeners(socket, table.id, () => router.push(`/table/${table.id}`))
+      const joined = new Promise<void>((resolve, reject) => {
+        let settled = false
+        const settle = (fn: () => void) => {
+          if (settled) return; settled = true
+          socket.off('table_joined', onJoined)
+          socket.off('socket_error', onError)
+          fn()
+        }
+        const onJoined = ({ tableId: tid }: { tableId: string }) => {
+          if (tid !== table.id) return
+          settle(resolve)
+        }
+        const onError = ({ message }: { message: string }) => {
+          settle(() => reject(new Error(message)))
+        }
+        socket.on('table_joined', onJoined)
+        socket.on('socket_error', onError)
+      })
+
       socket.emit('join_table', { tableId: table.id })
+
+      Promise.all([minWait, joined])
+        .then(() => { setShowJoinScreen(false); setLoading(null); router.push(`/table/${table.id}`) })
+        .catch((err: Error) => { setShowJoinScreen(false); setLoading(null); setError(err.message) })
     })
   }
 
@@ -64,6 +89,18 @@ export default function TableCard({ table, canJoin = true }: { table: TableRow; 
   const isActive = table.status === 'active'
 
   return (
+    <>
+    {showJoinScreen && (
+      <div className="fixed inset-0 z-[9999]">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/join-loading.png"
+          alt=""
+          className="absolute inset-0 h-full w-full object-cover"
+        />
+        <div className="absolute inset-0 bg-black/50" />
+      </div>
+    )}
     <div className="w-full min-w-0 rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
       {/* Name + status — min-w-0 on the row lets the h3 flex-1 actually truncate */}
       <div className="mb-3 flex min-w-0 items-center justify-between gap-2">
@@ -128,5 +165,6 @@ export default function TableCard({ table, canJoin = true }: { table: TableRow; 
         </button>
       </div>
     </div>
+    </>
   )
 }
