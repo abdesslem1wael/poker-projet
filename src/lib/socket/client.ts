@@ -10,6 +10,21 @@ export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>
 let socket: AppSocket | null = null
 
 export async function getSocket(): Promise<AppSocket> {
+  const supabase = createSupabaseClient()
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+  const token = session?.access_token ?? ''
+
+  // If the cached socket belongs to a different user (e.g. after logout + login in the
+  // same tab without a full page reload), tear it down so we reconnect with the current
+  // user's credentials.  Next.js App Router keeps module-level state alive across
+  // client-side navigations, so this guard is necessary.
+  if (socket && (socket.auth as { token?: string }).token !== token) {
+    socket.disconnect()
+    socket = null
+  }
+
   if (socket?.connected) return socket
   // Tear down a stale disconnected socket before creating a new one.
   if (socket) {
@@ -17,14 +32,9 @@ export async function getSocket(): Promise<AppSocket> {
     socket = null
   }
 
-  const supabase = createSupabaseClient()
-  const {
-    data: { session },
-  } = await supabase.auth.getSession()
-
   socket = io({
     // Connect to the same origin — custom server serves Next.js + Socket.io on one port.
-    auth: { token: session?.access_token ?? '' },
+    auth: { token },
     autoConnect: true,
   })
 
