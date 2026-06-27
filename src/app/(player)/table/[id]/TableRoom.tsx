@@ -1923,7 +1923,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           {(showdownResult || prevHandResult) && (
             <button
               onClick={() => setShowPrevHand(p => !p)}
-              className="tbl-hide-mobile"
               style={{
                 background: showPrevHand ? 'rgba(59,130,246,0.18)' : 'rgba(255,255,255,0.05)',
                 border: `1px solid ${showPrevHand ? 'rgba(59,130,246,0.45)' : 'rgba(255,255,255,0.1)'}`,
@@ -2037,7 +2036,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       {showPrevHand && (showdownResult || prevHandResult) && (
         showdownResult ? (
           /* Current showdown: full ShowdownBanner in a floating side panel */
-          <div style={{ position: 'fixed', top: 52, right: 12, zIndex: 600, pointerEvents: 'auto' }}>
+          <div className="tbl-result-panel" style={{ position: 'fixed', top: 52, right: 12, zIndex: 600, pointerEvents: 'auto' }}>
             <div style={{ position: 'relative' }}>
               <button
                 onClick={() => setShowPrevHand(false)}
@@ -2059,7 +2058,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           </div>
         ) : prevHandResult ? (
           /* Previous hand: compact summary panel */
-          <div style={{
+          <div className="tbl-result-panel" style={{
             position: 'fixed', top: 52, right: 12, zIndex: 600,
             background: 'linear-gradient(145deg, #0d1929, #080f1d)',
             border: '1px solid rgba(201,168,76,0.28)',
@@ -2916,6 +2915,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             /* Header */
             .tbl-header{height:30px!important;padding:0 8px!important;}
             .tbl-hide-mobile{display:none!important;}
+
+            /* Result panel — shift up to match shorter header, cap width */
+            .tbl-result-panel{top:34px!important;max-width:calc(100vw - 24px)!important;}
+            .tbl-showdown-panel{max-width:calc(100vw - 24px)!important;}
 
             /* Chat panel — smaller and tucked in the top-right so it stays clear of the table */
             .tbl-chat-panel{width:190px!important;top:34px!important;bottom:64px!important;}
