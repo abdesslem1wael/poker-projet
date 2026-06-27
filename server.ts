@@ -124,6 +124,9 @@ nextApp.prepare().then(() => {
     cors: { origin: false },
   })
 
+  // Expose io to Next.js server actions (same Node.js process, different module graph).
+  ;(global as Record<string, unknown>).__socketIo = io
+
   // ── Turn timer ─────────────────────────────────────────────────────────────
   const TURN_TIMEOUT_MS = 60_000  // 60 seconds per player turn
   const turnTimers = new Map<string, NodeJS.Timeout>()
@@ -314,7 +317,7 @@ nextApp.prepare().then(() => {
       const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
       for (const s of roomSockets) {
         if (brokePlayers.some(p => p.playerId === s.data.userId)) {
-          s.emit('kicked_from_table', { tableId })
+          s.emit('kicked_from_table', { tableId, reason: 'out_of_chips' })
           s.data.seatedAtTables.delete(tableId)
           s.leave(`table:${tableId}`)
         }
@@ -848,7 +851,7 @@ nextApp.prepare().then(() => {
       const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
       for (const s of roomSockets) {
         if (s.data.userId === playerId) {
-          s.emit('kicked_from_table', { tableId })
+          s.emit('kicked_from_table', { tableId, reason: 'admin_kicked' })
           s.data.joinedTables.delete(tableId)
           s.data.seatedAtTables.delete(tableId)
           s.leave(`table:${tableId}`)

@@ -5,6 +5,7 @@ import SocketStatus from './SocketStatus'
 import TableCard from './TableCard'
 import SettingsModal from './SettingsModal'
 import PasswordChangeModal from './PasswordChangeModal'
+import ChipsDisplay from './ChipsDisplay'
 
 type TableRow = {
   id: string
@@ -121,9 +122,7 @@ export default async function LobbyPage() {
             </div>
             <div className="rounded-xl bg-zinc-800/60 px-4 py-3">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Chips</p>
-              <p className="mt-1 text-lg font-bold tabular-nums text-amber-400">
-                {wallet != null ? wallet.chips.toLocaleString() : '—'}
-              </p>
+              <ChipsDisplay initialChips={wallet?.chips ?? null} />
             </div>
           </div>
         </section>

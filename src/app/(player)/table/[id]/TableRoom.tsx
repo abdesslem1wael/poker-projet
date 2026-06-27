@@ -945,7 +945,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [runoutRevealedCards, setRunoutRevealedCards] = useState<Record<string, [Card, Card]>>({})
   const [sessionInfo, setSessionInfo]    = useState<SessionInfo | null>(null)
   const [sessionDisplay, setSessionDisplay] = useState<number>(0)
-  const [kickedMsg, setKickedMsg]        = useState<string | null>(null)
+  const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' } | null>(null)
   const [muted, setMuted]                = useState(false)
   const [myCurrentStatus, setMyCurrentStatus] = useState<'seated' | 'spectating'>(myStatus)
   const [outOfChipsMsg, setOutOfChipsMsg] = useState(false)
@@ -1465,9 +1465,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         setSessionInfo(info)
       }
 
-      const onKickedFromTable = (p: { tableId: string }) => {
+      const onKickedFromTable = (p: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => {
         if (!active || p.tableId !== initialState.tableId) return
-        setKickedMsg('You have been removed from this table by the admin.')
+        const msg = p.reason === 'out_of_chips'
+          ? 'Hard luck! You ran out of chips.'
+          : 'You were removed by an admin.'
+        setKickedMsg({ msg, reason: p.reason })
         setTimeout(() => { if (active) router.push(isAdmin ? '/admin/dashboard' : '/lobby') }, 2500)
       }
 
@@ -1776,19 +1779,27 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         </div>
       )}
 
-      {/* ── Kicked toast ────────────────────────────────────────────────────── */}
+      {/* ── Kicked / out-of-chips overlay ───────────────────────────────────── */}
       {kickedMsg && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 1000,
           background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
           <div style={{
-            background: '#1a0a0a', border: '1px solid #b91c1c',
+            background: kickedMsg.reason === 'out_of_chips' ? '#1c1000' : '#1a0a0a',
+            border: `1px solid ${kickedMsg.reason === 'out_of_chips' ? '#d97706' : '#b91c1c'}`,
             borderRadius: 12, padding: '24px 32px', textAlign: 'center',
             boxShadow: '0 8px 40px rgba(0,0,0,0.8)',
           }}>
-            <div style={{ fontSize: 32, marginBottom: 10 }}>🚫</div>
-            <div style={{ color: '#fca5a5', fontWeight: 700, fontSize: 15, marginBottom: 6 }}>{kickedMsg}</div>
+            <div style={{ fontSize: 32, marginBottom: 10 }}>
+              {kickedMsg.reason === 'out_of_chips' ? '💸' : '🚫'}
+            </div>
+            <div style={{
+              color: kickedMsg.reason === 'out_of_chips' ? '#fde68a' : '#fca5a5',
+              fontWeight: 700, fontSize: 15, marginBottom: 6,
+            }}>
+              {kickedMsg.msg}
+            </div>
             <div style={{ color: '#6b7280', fontSize: 12 }}>Redirecting to lobby…</div>
           </div>
         </div>

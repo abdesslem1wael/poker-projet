@@ -188,10 +188,12 @@ export interface ServerToClientEvents {
     secondsRemaining: number
     isExpired: boolean
   }) => void
-  // Emitted only to the socket(s) of a player who has been removed by admin.
-  kicked_from_table: (payload: { tableId: string }) => void
+  // Emitted only to the socket(s) of a player who has been removed from a table.
+  kicked_from_table: (payload: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => void
   // Live table chat — broadcast to everyone (seated + spectating) in the table room.
   table_chat_message: (payload: ChatMessage) => void
+  // Emitted directly to a player's socket(s) when an admin adjusts their chip balance.
+  wallet_update: (payload: { chips: number }) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────

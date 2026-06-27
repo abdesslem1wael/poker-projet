@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
+import { getIo } from '@/lib/socket/io-access'
 
 export type ActionState = { error: string } | undefined
 
@@ -148,6 +149,17 @@ export async function adjustChipsAction(
   })
 
   if (txError) return { error: txError.message }
+
+  // Push the updated balance to the player's active socket(s) immediately.
+  const io = getIo()
+  if (io) {
+    const sockets = await io.fetchSockets()
+    for (const s of sockets) {
+      if (s.data.userId === playerId) {
+        s.emit('wallet_update', { chips: newChips })
+      }
+    }
+  }
 
   revalidatePath('/admin/players')
   redirect('/admin/players')
