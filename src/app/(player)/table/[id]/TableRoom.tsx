@@ -790,6 +790,58 @@ function ShowdownBanner({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WinnerToast — compact auto-dismissing pill shown at the end of each hand.
+// The full breakdown is still available in the "Last Hand" side panel.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function WinnerToast({ showdown, onDismiss }: { showdown: ShowdownPayload; onDismiss: () => void }) {
+  const primaryPot  = showdown.pots[0]
+  const winnerIds   = new Set(primaryPot?.winners ?? [])
+  const winners     = showdown.players.filter(p => winnerIds.has(p.playerId))
+  const winnerLabel = winners.map(w => w.username).join(' & ')
+  const winnerNet   = primaryPot?.amount ?? 0
+  const handName    = primaryPot?.winnerHandName
+
+  return (
+    <div style={{
+      position: 'fixed', top: 54, left: '50%', transform: 'translateX(-50%)',
+      zIndex: 400, pointerEvents: 'none',
+      animation: 'winner-toast-in 0.38s cubic-bezier(.22,.61,.36,1)',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        background: 'rgba(4,10,22,0.93)',
+        border: '1px solid rgba(234,179,8,0.55)',
+        borderRadius: 26, padding: '7px 16px 7px 12px',
+        boxShadow: '0 0 0 1px rgba(234,179,8,0.1),0 8px 32px rgba(0,0,0,0.75),0 0 28px rgba(234,179,8,0.14)',
+        backdropFilter: 'blur(14px)',
+        whiteSpace: 'nowrap',
+      }}>
+        <span style={{ fontSize: 17 }}>🏆</span>
+        <span style={{ color: '#fde68a', fontWeight: 800, fontSize: 14 }}>{winnerLabel}</span>
+        <span style={{ color: '#4ade80', fontWeight: 700, fontSize: 13 }}>
+          +{formatNumber(winnerNet)}
+        </span>
+        {handName && handName !== 'Last Standing' && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.22)', fontSize: 13 }}>·</span>
+            <span style={{ color: '#93c5fd', fontSize: 13, fontWeight: 600 }}>{handName}</span>
+          </>
+        )}
+        <button
+          onClick={onDismiss}
+          style={{
+            background: 'transparent', border: 'none', color: '#475569',
+            fontSize: 14, cursor: 'pointer', padding: '0 0 0 4px',
+            lineHeight: 1, pointerEvents: 'auto',
+          }}
+        >✕</button>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DealerTipModal
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -943,6 +995,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [showPrevHand, setShowPrevHand]  = useState(false)
   const [revealedCards, setRevealedCards] = useState<Record<string, [Card, Card]>>({})
   const [runoutRevealedCards, setRunoutRevealedCards] = useState<Record<string, [Card, Card]>>({})
+  const [winnerToastVisible, setWinnerToastVisible] = useState(false)
   const [sessionInfo, setSessionInfo]    = useState<SessionInfo | null>(null)
   const [sessionDisplay, setSessionDisplay] = useState<number>(0)
   const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' } | null>(null)
@@ -1366,6 +1419,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         prevShowdownRef.current = null
         setMyHoleCards(p.holeCards)
         setShowdownResult(null)
+        setWinnerToastVisible(false)
         setRevealedCards({})
         setRunoutRevealedCards({})
         setShowPrevHand(false)
@@ -1406,6 +1460,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         setRunoutRevealedCards({})
         setTurnTimerInfo(null)
         setPreAction(null)
+        setWinnerToastVisible(true)
+        setTimeout(() => { if (active) setWinnerToastVisible(false) }, 4500)
         const me = p.players.find(pl => pl.playerId === currentUserId)
         if (me && me.netChipChange > 0) {
           setTimeout(() => { if (active) setShowTipModal(true) }, 1200)
@@ -1821,6 +1877,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         </div>
       )}
 
+      {/* ── Winner toast — compact pill, auto-hides after 4.5s ─────────────── */}
+      {winnerToastVisible && showdownResult && (
+        <WinnerToast showdown={showdownResult} onDismiss={() => setWinnerToastVisible(false)} />
+      )}
+
       {/* ── Socket error toast ──────────────────────────────────────────────── */}
       {socketError && (
         <div
@@ -1859,7 +1920,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               Next hand in {nextHandIn}s…
             </span>
           )}
-          {prevHandResult && (
+          {(showdownResult || prevHandResult) && (
             <button
               onClick={() => setShowPrevHand(p => !p)}
               className="tbl-hide-mobile"
@@ -1871,7 +1932,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                 fontSize: 10, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
               }}
             >
-              Last Hand
+              {showdownResult ? 'Results' : 'Last Hand'}
             </button>
           )}
         </div>
@@ -1972,61 +2033,86 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         </div>
       </header>
 
-      {/* ── Previous hand history panel ────────────────────────────────────── */}
-      {showPrevHand && prevHandResult && (
-        <div style={{
-          position: 'fixed', top: 52, right: 12, zIndex: 600,
-          background: 'linear-gradient(145deg, #0d1929, #080f1d)',
-          border: '1px solid rgba(201,168,76,0.28)',
-          borderRadius: 10, padding: '10px 13px', width: 270,
-          boxShadow: '0 8px 30px rgba(0,0,0,0.75)',
-          pointerEvents: 'auto',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span style={{ color: '#fde68a', fontSize: 12, fontWeight: 700 }}>
-              Hand #{prevHandResult.handNumber}
-            </span>
-            <button onClick={() => setShowPrevHand(false)}
-              style={{ background: 'transparent', border: 'none', color: '#475569', fontSize: 15, cursor: 'pointer', lineHeight: 1, padding: 0 }}>✕</button>
-          </div>
-          {prevHandResult.pots[0] && (
-            <div style={{ marginBottom: 7, fontSize: 10 }}>
-              <span style={{ color: '#475569' }}>Pot </span>
-              <span style={{ color: '#e8c97a', fontWeight: 700 }}>{formatNumber(prevHandResult.pots[0].amount)}</span>
-              <span style={{ color: '#475569' }}> · </span>
-              <span style={{ color: '#93c5fd' }}>{prevHandResult.pots[0].winnerHandName}</span>
+      {/* ── Hand result / previous hand history panel ──────────────────────── */}
+      {showPrevHand && (showdownResult || prevHandResult) && (
+        showdownResult ? (
+          /* Current showdown: full ShowdownBanner in a floating side panel */
+          <div style={{ position: 'fixed', top: 52, right: 12, zIndex: 600, pointerEvents: 'auto' }}>
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => setShowPrevHand(false)}
+                style={{
+                  position: 'absolute', top: 10, right: 12, zIndex: 10,
+                  background: 'transparent', border: 'none', color: '#475569',
+                  fontSize: 15, cursor: 'pointer', lineHeight: 1, padding: 0,
+                }}
+              >✕</button>
+              <ShowdownBanner
+                key={showdownResult.handNumber}
+                showdown={showdownResult}
+                currentUserId={currentUserId}
+                myHoleCards={myHoleCards}
+                onShow={handleShowCards}
+                revealedCards={revealedCards}
+              />
             </div>
-          )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: prevHandResult.communityCards.length > 0 ? 8 : 0 }}>
-            {prevHandResult.players.map(p => (
-              <div key={p.playerId} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10 }}>
-                <span style={{ color: p.playerId === currentUserId ? '#93c5fd' : '#94a3b8', fontWeight: 600, minWidth: 50, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {p.playerId === currentUserId ? 'You' : p.username}
-                </span>
-                {p.holeCards && (
-                  <div style={{ display: 'flex', gap: 2 }}>
-                    <PlayingCard c={p.holeCards[0]} size="xs" />
-                    <PlayingCard c={p.holeCards[1]} size="xs" />
-                  </div>
-                )}
-                {p.handName && (
-                  <span style={{ color: '#64748b', fontSize: 9, fontStyle: 'italic', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 60 }}>{p.handName}</span>
-                )}
-                <div style={{ flex: 1 }} />
-                <span style={{ color: p.netChipChange > 0 ? '#4ade80' : p.netChipChange < 0 ? '#f87171' : '#6b7280', fontWeight: 700, flexShrink: 0 }}>
-                  {p.netChipChange > 0 ? '+' : ''}{formatNumber(p.netChipChange)}
-                </span>
-              </div>
-            ))}
           </div>
-          {prevHandResult.communityCards.length > 0 && (
-            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
-              {prevHandResult.communityCards.map((c, i) => (
-                <PlayingCard key={i} c={c} size="xs" />
+        ) : prevHandResult ? (
+          /* Previous hand: compact summary panel */
+          <div style={{
+            position: 'fixed', top: 52, right: 12, zIndex: 600,
+            background: 'linear-gradient(145deg, #0d1929, #080f1d)',
+            border: '1px solid rgba(201,168,76,0.28)',
+            borderRadius: 10, padding: '10px 13px', width: 270,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.75)',
+            pointerEvents: 'auto',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ color: '#fde68a', fontSize: 12, fontWeight: 700 }}>
+                Hand #{prevHandResult.handNumber}
+              </span>
+              <button onClick={() => setShowPrevHand(false)}
+                style={{ background: 'transparent', border: 'none', color: '#475569', fontSize: 15, cursor: 'pointer', lineHeight: 1, padding: 0 }}>✕</button>
+            </div>
+            {prevHandResult.pots[0] && (
+              <div style={{ marginBottom: 7, fontSize: 10 }}>
+                <span style={{ color: '#475569' }}>Pot </span>
+                <span style={{ color: '#e8c97a', fontWeight: 700 }}>{formatNumber(prevHandResult.pots[0].amount)}</span>
+                <span style={{ color: '#475569' }}> · </span>
+                <span style={{ color: '#93c5fd' }}>{prevHandResult.pots[0].winnerHandName}</span>
+              </div>
+            )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginBottom: prevHandResult.communityCards.length > 0 ? 8 : 0 }}>
+              {prevHandResult.players.map(p => (
+                <div key={p.playerId} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10 }}>
+                  <span style={{ color: p.playerId === currentUserId ? '#93c5fd' : '#94a3b8', fontWeight: 600, minWidth: 50, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {p.playerId === currentUserId ? 'You' : p.username}
+                  </span>
+                  {p.holeCards && (
+                    <div style={{ display: 'flex', gap: 2 }}>
+                      <PlayingCard c={p.holeCards[0]} size="xs" />
+                      <PlayingCard c={p.holeCards[1]} size="xs" />
+                    </div>
+                  )}
+                  {p.handName && (
+                    <span style={{ color: '#64748b', fontSize: 9, fontStyle: 'italic', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 60 }}>{p.handName}</span>
+                  )}
+                  <div style={{ flex: 1 }} />
+                  <span style={{ color: p.netChipChange > 0 ? '#4ade80' : p.netChipChange < 0 ? '#f87171' : '#6b7280', fontWeight: 700, flexShrink: 0 }}>
+                    {p.netChipChange > 0 ? '+' : ''}{formatNumber(p.netChipChange)}
+                  </span>
+                </div>
               ))}
             </div>
-          )}
-        </div>
+            {prevHandResult.communityCards.length > 0 && (
+              <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                {prevHandResult.communityCards.map((c, i) => (
+                  <PlayingCard key={i} c={c} size="xs" />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null
       )}
 
       {/* ── Table chat — fixed floating panel, collapsible via header button.
@@ -2222,15 +2308,16 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                     </>
                   )}
 
-                  {!hand && showdownResult && (
-                    <ShowdownBanner
-                      key={showdownResult.handNumber}
-                      showdown={showdownResult}
-                      currentUserId={currentUserId}
-                      myHoleCards={myHoleCards}
-                      onShow={handleShowCards}
-                      revealedCards={revealedCards}
-                    />
+                  {/* At showdown keep the board visible in the center — the compact
+                      WinnerToast (top-centre) and "Results" side panel carry the detail. */}
+                  {!hand && showdownResult && showdownResult.communityCards.length > 0 && (
+                    <div className="tbl-community-row" style={{ display: 'flex', gap: 6 }}>
+                      {showdownResult.communityCards.map((c, i) => (
+                        <div key={i} style={{ lineHeight: 0 }}>
+                          <PlayingCard c={c} size="community" />
+                        </div>
+                      ))}
+                    </div>
                   )}
 
                   {!hand && !showdownResult && !nextHandIn && (
@@ -2335,6 +2422,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         // Opponent cards shrink to "xs" once 7+ seats are in play — the table
                         // gets a lot more crowded per seat at that point, on every screen size.
                         const oppCardSize: CardSize = max <= 6 ? 'sm' : 'xs'
+                        // Revealed cards (all-in runout or showdown) get one size larger
+                        // so they are clearly readable from the table view.
+                        const revealedCardSize: CardSize = max <= 6 ? 'md' : 'sm'
 
                         const sideCardNode = !isHero ? (
                           hand && !folded && hp ? (
@@ -2344,9 +2434,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                                 <PlayingCard c={effectiveHoleCards[1]} size={oppCardSize} />
                               </div>
                             ) : !isMe && runoutCards ? (
-                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2 }}>
-                                <PlayingCard c={runoutCards[0]} size={oppCardSize} />
-                                <PlayingCard c={runoutCards[1]} size={oppCardSize} />
+                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 4 }}>
+                                <PlayingCard c={runoutCards[0]} size={revealedCardSize} />
+                                <PlayingCard c={runoutCards[1]} size={revealedCardSize} />
                               </div>
                             ) : !isMe && effectiveDealtSeats.has(seat.seatNumber) ? (
                               <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2, animation: 'card-deal-in 0.3s ease-out' }}>
@@ -2355,9 +2445,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                               </div>
                             ) : null
                           ) : (!hand && (sdP?.holeCards || shownCards) && !isMe) ? (
-                            <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2 }}>
-                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[0]} size={oppCardSize} />
-                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[1]} size={oppCardSize} />
+                            <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 4 }}>
+                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[0]} size={revealedCardSize} />
+                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[1]} size={revealedCardSize} />
                             </div>
                           ) : null
                         ) : null
@@ -2777,6 +2867,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');
           @keyframes card-deal-in{from{opacity:0;transform:translateY(-16px) scale(0.84) rotate(-5deg)}to{opacity:1;transform:translateY(0) scale(1) rotate(0deg)}}
           @keyframes pot-pulse{0%{transform:translateY(16px) scale(1)}45%{transform:translateY(16px) scale(1.14)}100%{transform:translateY(16px) scale(1)}}
+          @keyframes winner-toast-in{from{opacity:0;transform:translateX(-50%) translateY(-10px) scale(0.9)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
           .ap-range{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;outline:none;cursor:pointer;}
           .ap-range::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
           .ap-range::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
