@@ -73,7 +73,7 @@ export default function TableCard({ table, canJoin = true }: { table: TableRow; 
       socket.emit('join_table', { tableId: table.id })
 
       Promise.all([minWait, joined])
-        .then(() => { setShowJoinScreen(false); setLoading(null); router.push(`/table/${table.id}`) })
+        .then(() => { router.push(`/table/${table.id}`) })
         .catch((err: Error) => { setShowJoinScreen(false); setLoading(null); setError(err.message) })
     })
   }
