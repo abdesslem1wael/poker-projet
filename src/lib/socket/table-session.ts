@@ -166,6 +166,15 @@ export async function joinTable(
   tableId: string,
   userId: string
 ): Promise<{ seatNumber: number } | { error: string }> {
+  const { data: profileData } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', userId)
+    .single()
+  if ((profileData as { role: string } | null)?.role === 'super_admin') {
+    return { error: 'Super Admin accounts cannot join tables as players.' }
+  }
+
   const { data: tableData } = await supabase
     .from('poker_tables')
     .select('max_players, status')

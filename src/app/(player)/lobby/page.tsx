@@ -18,7 +18,7 @@ type TableRow = {
 
 type Profile = {
   username: string
-  role: 'admin' | 'player'
+  role: 'admin' | 'player' | 'super_admin'
   must_change_password: boolean
 }
 
@@ -140,7 +140,7 @@ export default async function LobbyPage() {
           ) : (
             <div className="flex flex-col gap-3">
               {tables.map((t) => (
-                <TableCard key={t.id} table={t} />
+                <TableCard key={t.id} table={t} canJoin={profile?.role !== 'super_admin'} />
               ))}
             </div>
           )}

@@ -414,13 +414,33 @@ nextApp.prepare().then(() => {
 
     const { data: profilesData } = await supabase
       .from('profiles')
-      .select('id, username')
+      .select('id, username, role')
       .in('id', rows.map(r => r.player_id))
 
+    const profiles = (profilesData as Array<{ id: string; username: string; role: string }> | null) ?? []
+
+    // Evict any super_admin who somehow ended up seated.
+    const superAdminIds = profiles.filter(p => p.role === 'super_admin').map(p => p.id)
+    if (superAdminIds.length > 0) {
+      console.log(`[game] evicting super_admin from hand  table=${tableId} count=${superAdminIds.length}`)
+      await Promise.all(superAdminIds.map(id =>
+        supabase
+          .from('table_players')
+          .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
+          .eq('table_id', tableId)
+          .eq('player_id', id)
+          .neq('status', 'left')
+      ))
+      rows = rows.filter(r => !superAdminIds.includes(r.player_id))
+      if (rows.length < 2) {
+        const updatedState = await buildTableState(supabase, tableId)
+        if (updatedState) io.to(`table:${tableId}`).emit('table_state', updatedState)
+        return 'too_few'
+      }
+    }
+
     const usernameMap = new Map<string, string>(
-      ((profilesData as Array<{ id: string; username: string }> | null) ?? []).map(
-        p => [p.id, p.username],
-      ),
+      profiles.filter(p => p.role !== 'super_admin').map(p => [p.id, p.username]),
     )
 
     const allSeated = rows.map(r => ({

@@ -15,7 +15,7 @@ type TableRow = {
   status: 'waiting' | 'active'
 }
 
-export default function TableCard({ table }: { table: TableRow }) {
+export default function TableCard({ table, canJoin = true }: { table: TableRow; canJoin?: boolean }) {
   const router = useRouter()
   const [loading, setLoading] = useState<'join' | 'spectate' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -106,13 +106,19 @@ export default function TableCard({ table }: { table: TableRow }) {
 
       {/* Action buttons */}
       <div className="flex gap-2">
-        <button
-          onClick={handleJoin}
-          disabled={loading !== null}
-          className="flex-1 rounded-xl bg-emerald-600 py-3.5 text-sm font-bold text-white transition-colors active:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {loading === 'join' ? 'Joining…' : 'Join Table'}
-        </button>
+        {canJoin ? (
+          <button
+            onClick={handleJoin}
+            disabled={loading !== null}
+            className="flex-1 rounded-xl bg-emerald-600 py-3.5 text-sm font-bold text-white transition-colors active:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loading === 'join' ? 'Joining…' : 'Join Table'}
+          </button>
+        ) : (
+          <p className="flex flex-1 items-center text-xs text-zinc-500">
+            Admin accounts can watch only
+          </p>
+        )}
         <button
           onClick={handleSpectate}
           disabled={loading !== null}
