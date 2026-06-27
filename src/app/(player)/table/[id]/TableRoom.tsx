@@ -1038,6 +1038,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   // Tracks whether the current user was seated on the last table_state — used to detect
   // the seated→spectating transition so outOfChipsMsg only fires on a real demotion.
   const prevSeatedRef      = useRef(myStatus === 'seated')
+  const hasHandEverStartedRef = useRef(initialState.handState !== null)
 
   // ── Derived values ──────────────────────────────────────────────────────────
   mutedRef.current = muted
@@ -1068,7 +1069,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const sessionActive  = sessionInfo != null && !sessionInfo.isExpired
   const sessionExpired = sessionInfo != null && sessionInfo.isExpired
   const canLeave   = !sessionActive || isAdmin || state.tableType === 'open'
-  const canStart   = myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired
+  const canStart   = myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired && !hasHandEverStartedRef.current
 
   // Can I afford to call? If not, only all-in or fold is possible.
   const mustGoAllIn = !canCheck && callAmt > myStack
@@ -1414,6 +1415,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
       const onDealCards = (p: { tableId: string; holeCards: [Card, Card] }) => {
         if (!active || p.tableId !== initialState.tableId) return
+        hasHandEverStartedRef.current = true
         // Save previous showdown before clearing
         if (prevShowdownRef.current) setPrevHandResult(prevShowdownRef.current)
         prevShowdownRef.current = null

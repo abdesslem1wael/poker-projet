@@ -1,6 +1,7 @@
 import Link from 'next/link'
 import { createAdminClient } from '@/lib/supabase/admin'
 import CreateTableForm from './CreateTableForm'
+import DeleteTableButton from './DeleteTableButton'
 import { closeTableAction, reopenTableAction } from '@/app/actions/tables'
 
 type TableRow = {
@@ -109,25 +110,28 @@ export default async function AdminTablesPage() {
                           {new Date(t.created_at).toLocaleDateString()}
                         </td>
                         <td className="px-5 py-3 text-right">
-                          {t.status !== 'closed' ? (
-                            <form action={closeAction} className="inline">
-                              <button
-                                type="submit"
-                                className="rounded px-2.5 py-1 text-xs font-semibold text-zinc-400 border border-zinc-700/60 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
-                              >
-                                Close
-                              </button>
-                            </form>
-                          ) : (
-                            <form action={reopenAction} className="inline">
-                              <button
-                                type="submit"
-                                className="rounded px-2.5 py-1 text-xs font-semibold text-emerald-400 border border-emerald-900/50 transition-colors hover:bg-emerald-900/30"
-                              >
-                                Reopen
-                              </button>
-                            </form>
-                          )}
+                          <div className="inline-flex items-center gap-2">
+                            {t.status !== 'closed' ? (
+                              <form action={closeAction} className="inline">
+                                <button
+                                  type="submit"
+                                  className="rounded px-2.5 py-1 text-xs font-semibold text-zinc-400 border border-zinc-700/60 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+                                >
+                                  Close
+                                </button>
+                              </form>
+                            ) : (
+                              <form action={reopenAction} className="inline">
+                                <button
+                                  type="submit"
+                                  className="rounded px-2.5 py-1 text-xs font-semibold text-emerald-400 border border-emerald-900/50 transition-colors hover:bg-emerald-900/30"
+                                >
+                                  Reopen
+                                </button>
+                              </form>
+                            )}
+                            <DeleteTableButton tableId={t.id} tableName={t.name} />
+                          </div>
                         </td>
                       </tr>
                     )

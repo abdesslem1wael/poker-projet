@@ -157,7 +157,7 @@ export default async function AdminDashboardPage() {
                 Tips Collected
               </h2>
               <p className="mt-1 text-sm text-zinc-500">
-                Automatic rake (2%) + voluntary dealer tips, per table.
+                Automatic rake (3.5%) + voluntary dealer tips, per table.
               </p>
             </div>
             {grandTotal > 0 && (
@@ -203,7 +203,7 @@ export default async function AdminDashboardPage() {
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-zinc-500">Auto rake (2%)</span>
+                      <span className="text-zinc-500">Auto rake (3.5%)</span>
                       <span className="tabular-nums font-medium text-zinc-300">
                         {t.autoTips > 0 ? t.autoTips.toLocaleString() : '—'}
                       </span>

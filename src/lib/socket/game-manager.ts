@@ -429,14 +429,14 @@ export class GameManager {
   // ── Private helpers ───────────────────────────────────────────────────────
 
   // Settle the current voluntary raise level: if ≥ 2 players have contributed
-  // exactly the raise level, add 2% of (level × count) to tipPool.
+  // exactly the raise level, add 3.5% of (level × count) to tipPool.
   // Must be called BEFORE the acting player's roundContribution is updated.
   private settleTipForRound(state: HandState): void {
     if (state.voluntaryRaiseLevel <= 0) return
     const level = state.voluntaryRaiseLevel
     const count = state.players.filter(p => p.roundContribution === level).length
     if (count >= 2) {
-      state.tipPool += Math.floor(0.02 * level * count)
+      state.tipPool += Math.floor(0.035 * level * count)
     }
     state.voluntaryRaiseLevel = 0
   }

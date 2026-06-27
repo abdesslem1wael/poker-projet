@@ -129,3 +129,26 @@ export async function reopenTableAction(
   revalidatePath('/admin/tables')
   redirect('/admin/tables')
 }
+
+export async function deleteTableAction(
+  _state: ActionState,
+  formData: FormData
+): Promise<ActionState> {
+  const admin = await requireAdmin()
+  if (!admin) return { error: 'Unauthorized' }
+
+  const tableId = (formData.get('tableId') as string | null)?.trim()
+  if (!tableId) return { error: 'Table ID required' }
+
+  const adminClient = createAdminClient()
+
+  await adminClient.from('dealer_tips').delete().eq('table_id', tableId)
+  await adminClient.from('game_history').delete().eq('table_id', tableId)
+  await adminClient.from('table_players').delete().eq('table_id', tableId)
+  const { error } = await adminClient.from('poker_tables').delete().eq('id', tableId)
+
+  if (error) return { error: error.message }
+
+  revalidatePath('/admin/tables')
+  redirect('/admin/tables')
+}
