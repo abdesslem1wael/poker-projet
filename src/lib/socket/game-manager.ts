@@ -293,24 +293,38 @@ export class GameManager {
       }
 
       case 'ALL_IN': {
-        const allIn = actor.stack
-        const newContrib = actor.roundContribution + allIn
-        // If this constitutes a raise (new contribution exceeds current bet), settle previous tip.
-        if (newContrib > state.currentBet) {
+        const fullContrib = actor.roundContribution + actor.stack
+
+        // Cap to the highest total any non-folded opponent can reach this round.
+        // Prevents uncallable chips entering the pot when the big stack shoves.
+        const maxOpponentLevel = state.players
+          .filter(p => p.playerId !== actor.playerId && p.status !== 'folded')
+          .reduce((max, p) => Math.max(max, p.roundContribution + p.stack), 0)
+
+        // Apply cap only when the actor is the deepest stack and the cap would reduce the shove.
+        const cappedContrib =
+          maxOpponentLevel > actor.roundContribution && maxOpponentLevel < fullContrib
+            ? maxOpponentLevel
+            : fullContrib
+
+        const actualCommit = cappedContrib - actor.roundContribution
+
+        if (cappedContrib > state.currentBet) {
           this.settleTipForRound(state)
         }
-        actor.roundContribution = newContrib
-        actor.totalContributed += allIn
-        state.pot += allIn
-        actor.stack = 0
-        actor.status = 'all-in'
+
+        actor.roundContribution = cappedContrib
+        actor.totalContributed += actualCommit
+        state.pot += actualCommit
+        actor.stack -= actualCommit
+        if (actor.stack === 0) actor.status = 'all-in'
         actor.hasActedThisRound = true
-        // If the all-in constitutes a full raise, update currentBet and reset others.
-        if (newContrib > state.currentBet) {
-          const raiseBy = newContrib - state.currentBet
+
+        if (cappedContrib > state.currentBet) {
+          const raiseBy = cappedContrib - state.currentBet
           if (raiseBy >= state.minRaise) state.minRaise = raiseBy
-          state.currentBet = newContrib
-          state.voluntaryRaiseLevel = newContrib
+          state.currentBet = cappedContrib
+          state.voluntaryRaiseLevel = cappedContrib
           for (const p of state.players) {
             if (p.playerId !== actor.playerId && p.status === 'active') {
               p.hasActedThisRound = false

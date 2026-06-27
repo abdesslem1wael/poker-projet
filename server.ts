@@ -127,6 +127,9 @@ nextApp.prepare().then(() => {
   const TURN_TIMEOUT_MS = 60_000  // 60 seconds per player turn
   const turnTimers = new Map<string, NodeJS.Timeout>()
   const turnTimerStartedAt = new Map<string, number>()  // tableId → epoch ms
+  // Timer-table players who are seated in the DB but have no live socket.
+  // They pay blinds and are auto-acted instead of waiting for the timer.
+  const disconnectedSeats = new Map<string, Set<string>>()  // tableId → Set<userId>
 
   function clearTurnTimer(tableId: string): void {
     const t = turnTimers.get(tableId)
@@ -175,7 +178,7 @@ nextApp.prepare().then(() => {
           } else {
             const next = gm.getPublicHandState(tableId)
             if (next?.currentTurnPlayerId) {
-              startTurnTimer(tableId, next.currentTurnPlayerId)
+              await handleTurnStart(tableId, next.currentTurnPlayerId)
             }
           }
 
@@ -188,6 +191,52 @@ nextApp.prepare().then(() => {
     }, TURN_TIMEOUT_MS)
 
     turnTimers.set(tableId, t)
+  }
+
+  // If the next actor is a disconnected timer-table player, auto-acts them
+  // immediately (CHECK if free, else FOLD) and chains through consecutive
+  // disconnected players.  Connected players get the normal turn timer.
+  async function handleTurnStart(tableId: string, playerId: string): Promise<void> {
+    const tableDisconnected = disconnectedSeats.get(tableId)
+    if (!tableDisconnected?.has(playerId)) {
+      startTurnTimer(tableId, playerId)
+      return
+    }
+
+    let result = gm.processAction(tableId, playerId, 'CHECK')
+    let autoAction: BettingAction = 'CHECK'
+    if ('error' in result) {
+      result = gm.processAction(tableId, playerId, 'FOLD')
+      autoAction = 'FOLD'
+      if ('error' in result) return
+    }
+
+    console.log(`[game] disconnected auto-${autoAction}  table=${tableId} user=${playerId}`)
+    io.to(`table:${tableId}`).emit('action_result', {
+      tableId, playerId, action: autoAction, amount: 0,
+    })
+
+    if (result.handEnded) {
+      await handleHandEnd(tableId, result.data)
+      return
+    }
+
+    if ('runout' in result && result.runout) {
+      const allHoleCards = gm.getAllHoleCards(tableId)
+      io.to(`table:${tableId}`).emit('runout_cards_revealed', { tableId, players: allHoleCards })
+      const runoutState = await buildTableState(supabase, tableId)
+      if (runoutState) io.to(`table:${tableId}`).emit('table_state', runoutState)
+      handleAllInRunout(tableId)
+      return
+    }
+
+    const state = await buildTableState(supabase, tableId)
+    if (state) io.to(`table:${tableId}`).emit('table_state', state)
+
+    const next = gm.getPublicHandState(tableId)
+    if (next?.currentTurnPlayerId) {
+      await handleTurnStart(tableId, next.currentTurnPlayerId)
+    }
   }
 
   // ── All-in runout: deal remaining streets with 2s delays ──────────────────
@@ -269,6 +318,9 @@ nextApp.prepare().then(() => {
           s.leave(`table:${tableId}`)
         }
       }
+      for (const p of brokePlayers) {
+        disconnectedSeats.get(tableId)?.delete(p.playerId)
+      }
     }
 
     io.to(`table:${tableId}`).emit('showdown_result', showdown)
@@ -319,7 +371,40 @@ nextApp.prepare().then(() => {
       .eq('table_id', tableId)
       .eq('status', 'seated')
 
-    const rows = (playersData as Array<{ player_id: string; seat_number: number }> | null) ?? []
+    const allSeatedRows = (playersData as Array<{ player_id: string; seat_number: number }> | null) ?? []
+
+    let rows: typeof allSeatedRows
+
+    if (table_type === 'open') {
+      // Open tables: only deal to connected players; mark any stale seats as left.
+      const preHandSockets = await io.in(`table:${tableId}`).fetchSockets()
+      const connectedUserIds = new Set(preHandSockets.map(s => s.data.userId))
+
+      const staleRows = allSeatedRows.filter(r => !connectedUserIds.has(r.player_id))
+      rows = allSeatedRows.filter(r => connectedUserIds.has(r.player_id))
+
+      if (staleRows.length > 0) {
+        console.log(`[game] removing stale open-table seats  table=${tableId} count=${staleRows.length}`)
+        await Promise.all(staleRows.map(r =>
+          supabase
+            .from('table_players')
+            .update({ status: 'left', left_at: new Date().toISOString() })
+            .eq('table_id', tableId)
+            .eq('player_id', r.player_id)
+            .neq('status', 'left')
+        ))
+        if (rows.length < 2) {
+          const updatedState = await buildTableState(supabase, tableId)
+          if (updatedState) io.to(`table:${tableId}`).emit('table_state', updatedState)
+          return 'too_few'
+        }
+      }
+    } else {
+      // Timer tables: include all seated players regardless of connection status.
+      // Disconnected players will be auto-acted via handleTurnStart.
+      rows = allSeatedRows
+    }
+
     if (rows.length < 2) return 'too_few'
 
     const { data: profilesData } = await supabase
@@ -360,10 +445,10 @@ nextApp.prepare().then(() => {
       if (cards) s.emit('deal_cards', { tableId, holeCards: cards })
     }
 
-    // Start the turn timer for the first actor.
+    // Start the turn (or auto-act disconnected players) for the first actor.
     const firstState = gm.getPublicHandState(tableId)
     if (firstState?.currentTurnPlayerId) {
-      startTurnTimer(tableId, firstState.currentTurnPlayerId)
+      await handleTurnStart(tableId, firstState.currentTurnPlayerId)
     }
 
     const state = await buildTableState(supabase, tableId)
@@ -464,6 +549,7 @@ nextApp.prepare().then(() => {
       socket.data.joinedTables.add(tableId)
       socket.data.seatedAtTables.add(tableId)
       socket.join(`table:${tableId}`)
+      disconnectedSeats.get(tableId)?.delete(userId)
 
       socket.emit('table_joined', { tableId, seatNumber: result.seatNumber })
 
@@ -604,7 +690,7 @@ nextApp.prepare().then(() => {
       } else {
         const next = gm.getPublicHandState(tableId)
         if (next?.currentTurnPlayerId) {
-          startTurnTimer(tableId, next.currentTurnPlayerId)
+          await handleTurnStart(tableId, next.currentTurnPlayerId)
         }
       }
 
@@ -689,11 +775,12 @@ nextApp.prepare().then(() => {
             await handleHandEnd(tableId, result.data)
           } else {
             const next = gm.getPublicHandState(tableId)
-            if (next?.currentTurnPlayerId) startTurnTimer(tableId, next.currentTurnPlayerId)
+            if (next?.currentTurnPlayerId) await handleTurnStart(tableId, next.currentTurnPlayerId)
           }
         }
       }
       await leaveTable(supabase, tableId, playerId)
+      disconnectedSeats.get(tableId)?.delete(playerId)
       // Notify and eject the kicked player's sockets.
       const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
       for (const s of roomSockets) {
@@ -714,13 +801,24 @@ nextApp.prepare().then(() => {
       console.log(`[socket] disconnected  user=${username} socket=${socket.id}`)
 
       for (const tableId of socket.data.joinedTables) {
-        // Keep seat when session is running (player is expected to reconnect)
-        // or when a hand is in progress (hand-end logic handles seat cleanup).
-        // 'open' tables never lock the seat this way.
         const sessionLocked = sm.lockLeaving(tableId)
-        if (!gm.hasActiveHand(tableId) && !sessionLocked) {
+
+        if (sessionLocked && socket.data.seatedAtTables.has(tableId)) {
+          // Timer table with an active session: keep the seat reserved.
+          // Only flag as disconnected if this was their last socket in the room
+          // (the socket has already left all rooms before 'disconnect' fires).
+          const remainingSockets = await io.in(`table:${tableId}`).fetchSockets()
+          const stillConnected = remainingSockets.some(s => s.data.userId === userId)
+          if (!stillConnected) {
+            if (!disconnectedSeats.has(tableId)) disconnectedSeats.set(tableId, new Set())
+            disconnectedSeats.get(tableId)!.add(userId)
+            console.log(`[socket] seat reserved for disconnected player  user=${username} table=${tableId}`)
+          }
+        } else if (!gm.hasActiveHand(tableId) && !sessionLocked) {
+          // Open table (or timer table with no session): release the seat.
           await leaveTable(supabase, tableId, userId)
         }
+
         const state = await buildTableState(supabase, tableId)
         if (state) io.to(`table:${tableId}`).emit('table_state', state)
       }
