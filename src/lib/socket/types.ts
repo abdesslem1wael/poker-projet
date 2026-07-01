@@ -67,6 +67,8 @@ export interface ClientToServerEvents {
   extend_session: (payload: { tableId: string; additionalMinutes: number }) => void
   // Admin: remove a seated player from a table.
   kick_player: (payload: { tableId: string; playerId: string }) => void
+  // Admin: start a scheduled break for a table.
+  start_break: (payload: { tableId: string }) => void
   // Live table chat — sender must be seated or spectating this table.
   table_chat_send: (payload: { tableId: string; message: string }) => void
 }
@@ -77,6 +79,7 @@ export type SeatInfo = {
   playerId: string | null
   username: string | null
   avatarId: number | null
+  eliminated: boolean  // Sit & Go only — always false for cash tables
 }
 
 export type SpectatorInfo = {
@@ -95,6 +98,14 @@ export type TableStatePayload = {
   seats: SeatInfo[]       // length === maxPlayers; null playerId means empty seat
   spectators: SpectatorInfo[]
   handState: PublicHandState | null  // null when no hand is running
+  // ── Sit & Go (Step 3) ──────────────────────────────────────────────────
+  gameMode: 'cash' | 'sit_go'
+  prizePool: number | null       // null for cash tables
+  sitGoStatus: 'registering' | 'ready' | 'running' | 'finished' | null  // null for cash tables
+  // ── Sit & Go blind levels (Step 6) ──────────────────────────────────────
+  // smallBlind/bigBlind above are already the CURRENT blinds for the table —
+  // blindLevel is purely informational for the "Level N" badge/card display.
+  blindLevel: number | null      // null for cash tables
 }
 
 // ── Showdown result (broadcast when a hand ends) ───────────────────────────
@@ -127,6 +138,16 @@ export type ShowdownPayload = {
   players: ShowdownPlayerResult[]
   communityCards: Card[]
   tipAmount: number  // automatic rake — admin-only display, not sent to regular players
+}
+
+// ── Break scheduling ────────────────────────────────────────────────────────
+export type BreakPhase = 'countdown' | 'awaiting_hand_end' | 'active'
+
+export type BreakStatePayload = {
+  tableId: string
+  phase: BreakPhase | null   // null = no break in progress (used to explicitly clear client state)
+  countdownSecondsRemaining: number  // meaningful while phase === 'countdown'
+  breakSecondsRemaining: number      // meaningful while phase === 'active'
 }
 
 // ── Table chat (live-only, not persisted) ──────────────────────────────────
@@ -190,6 +211,8 @@ export interface ServerToClientEvents {
   }) => void
   // Emitted only to the socket(s) of a player who has been removed from a table.
   kicked_from_table: (payload: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => void
+  // Emitted on break state changes and periodically while a break is scheduled/running.
+  break_update: (payload: BreakStatePayload) => void
   // Live table chat — broadcast to everyone (seated + spectating) in the table room.
   table_chat_message: (payload: ChatMessage) => void
   // Emitted directly to a player's socket(s) when an admin adjusts their chip balance.

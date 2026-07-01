@@ -23,6 +23,8 @@ async function requireAdmin() {
   return profile?.role === 'admin' || profile?.role === 'super_admin' ? user : null
 }
 
+const HOUSE_FEE_PERCENT = 10
+
 export async function createTableAction(
   _state: ActionState,
   formData: FormData
@@ -34,6 +36,7 @@ export async function createTableAction(
   const smallBlind = parseInt(formData.get('smallBlind') as string, 10)
   const maxPlayers = parseInt(formData.get('maxPlayers') as string, 10)
   const tableType = formData.get('tableType') as string
+  const gameMode = (formData.get('gameMode') as string) || 'cash'
 
   if (!name) return { error: 'Table name is required' }
   if (isNaN(smallBlind) || smallBlind <= 0) {
@@ -45,19 +48,51 @@ export async function createTableAction(
   if (tableType !== 'timer' && tableType !== 'open') {
     return { error: 'Table type must be either timer or open' }
   }
+  if (gameMode !== 'cash' && gameMode !== 'sit_go') {
+    return { error: 'Game mode must be either cash or sit_go' }
+  }
 
   const bigBlind = smallBlind * 2
 
-  const adminClient = createAdminClient()
-  const { error } = await adminClient.from('poker_tables').insert({
+  const insertRow: Record<string, unknown> = {
     name,
     small_blind: smallBlind,
     big_blind: bigBlind,
     max_players: maxPlayers,
     table_type: tableType,
+    game_mode: gameMode,
     status: 'waiting',
     created_by: admin.id,
-  })
+  }
+
+  if (gameMode === 'sit_go') {
+    const buyIn = parseInt(formData.get('buyIn') as string, 10)
+    const startingStack = parseInt(formData.get('startingStack') as string, 10)
+
+    if (isNaN(buyIn) || buyIn <= 0) {
+      return { error: 'Buy-in must be greater than 0' }
+    }
+    if (isNaN(startingStack) || startingStack <= 0) {
+      return { error: 'Starting stack must be greater than 0' }
+    }
+
+    const totalBuyIns = buyIn * maxPlayers
+    const houseFee = totalBuyIns * (HOUSE_FEE_PERCENT / 100)
+    const prizePool = totalBuyIns - houseFee
+
+    insertRow.buy_in = buyIn
+    insertRow.starting_stack = startingStack
+    insertRow.sit_go_status = 'registering'
+    insertRow.house_fee_percent = HOUSE_FEE_PERCENT
+    insertRow.prize_pool = Math.round(prizePool)
+    // Remembered so blind levels (Step 6) can always compute back from level 1,
+    // even after small_blind/big_blind have been scaled up by later levels.
+    insertRow.original_small_blind = smallBlind
+    insertRow.original_big_blind = bigBlind
+  }
+
+  const adminClient = createAdminClient()
+  const { error } = await adminClient.from('poker_tables').insert(insertRow)
 
   if (error) return { error: error.message }
 

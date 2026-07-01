@@ -97,6 +97,10 @@ export class GameManager {
     supabase: DB,
     smallBlind: number,
     bigBlind: number,
+    // Sit & Go tables pass their tournament stacks here (sourced from
+    // sit_go_registrations.current_stack) instead of the wallets table —
+    // cash games omit this and keep the existing wallet-backed behavior.
+    stackOverrides?: Map<string, number>,
   ): Promise<{ ok: true } | { error: string }> {
     if (seatedPlayers.length < 2) {
       return { error: 'Need at least 2 seated players to start a hand' }
@@ -105,17 +109,22 @@ export class GameManager {
     // Sort by seat number for a consistent, deterministic player order.
     const sorted = [...seatedPlayers].sort((a, b) => a.seatNumber - b.seatNumber)
 
-    // Load stacks from the wallets table.
-    const { data: walletRows, error: walletErr } = await supabase
-      .from('wallets')
-      .select('user_id, chips')
-      .in('user_id', sorted.map(p => p.playerId))
+    let stackMap: Map<string, number>
+    if (stackOverrides) {
+      stackMap = stackOverrides
+    } else {
+      // Load stacks from the wallets table (cash games).
+      const { data: walletRows, error: walletErr } = await supabase
+        .from('wallets')
+        .select('user_id, chips')
+        .in('user_id', sorted.map(p => p.playerId))
 
-    if (walletErr) return { error: 'Failed to load player stacks' }
+      if (walletErr) return { error: 'Failed to load player stacks' }
 
-    const stackMap = new Map<string, number>()
-    for (const w of (walletRows as Array<{ user_id: string; chips: number }> | null) ?? []) {
-      stackMap.set(w.user_id, w.chips)
+      stackMap = new Map<string, number>()
+      for (const w of (walletRows as Array<{ user_id: string; chips: number }> | null) ?? []) {
+        stackMap.set(w.user_id, w.chips)
+      }
     }
 
     // Safety net: server.ts filters broke players before calling startHand,

@@ -13,6 +13,7 @@ import type {
   PublicPlayerHandState,
   SeatInfo,
   ChatMessage,
+  BreakStatePayload,
 } from '@/lib/socket/types'
 import { getSocket } from '@/lib/socket/client'
 import type { AppSocket } from '@/lib/socket/client'
@@ -36,6 +37,13 @@ type SessionInfo = {
   isExpired: boolean
   tableName: string
   syncedAt: number  // epoch ms when we last received a session_update
+}
+
+type BreakDisplayInfo = {
+  phase: 'countdown' | 'awaiting_hand_end' | 'active'
+  countdownSecondsRemaining: number
+  breakSecondsRemaining: number
+  syncedAt: number  // epoch ms when we last received a break_update
 }
 
 type LastAction = { action: BettingAction; amount?: number }
@@ -935,6 +943,7 @@ function buildLayoutPreview(seatCount: number, currentUserId: string): {
     playerId: i === 0 ? currentUserId : `preview-bot-${i + 1}`,
     username: i === 0 ? 'You' : `Bot ${i + 1}`,
     avatarId: null,
+    eliminated: false,
   }))
 
   const players: PublicPlayerHandState[] = seats.map((s, i) => ({
@@ -998,6 +1007,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [winnerToastVisible, setWinnerToastVisible] = useState(false)
   const [sessionInfo, setSessionInfo]    = useState<SessionInfo | null>(null)
   const [sessionDisplay, setSessionDisplay] = useState<number>(0)
+  const [breakInfo, setBreakInfo]        = useState<BreakDisplayInfo | null>(null)
+  const [breakCountdownDisplay, setBreakCountdownDisplay] = useState<number>(0)
+  const [breakDurationDisplay, setBreakDurationDisplay] = useState<number>(0)
   const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' } | null>(null)
   const [muted, setMuted]                = useState(false)
   const [myCurrentStatus, setMyCurrentStatus] = useState<'seated' | 'spectating'>(myStatus)
@@ -1026,6 +1038,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const socketRef          = useRef<AppSocket | null>(null)
   const prevShowdownRef    = useRef<ShowdownPayload | null>(null)
   const sessionRef         = useRef<SessionInfo | null>(null)
+  const breakRef           = useRef<BreakDisplayInfo | null>(null)
   const mutedRef           = useRef(false)
   const heroCardTimersRef  = useRef<ReturnType<typeof setTimeout>[]>([])
   const seatAnimTimersRef  = useRef<ReturnType<typeof setTimeout>[]>([])
@@ -1068,8 +1081,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const seatedCnt  = state.seats.filter(s => s.playerId !== null).length
   const sessionActive  = sessionInfo != null && !sessionInfo.isExpired
   const sessionExpired = sessionInfo != null && sessionInfo.isExpired
-  const canLeave   = !sessionActive || isAdmin || state.tableType === 'open'
-  const canStart   = myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired && !hasHandEverStartedRef.current
+  const breakActive = breakInfo?.phase === 'active'
+  const breakPendingHandEnd = breakInfo?.phase === 'awaiting_hand_end'
+  const canLeave   = (!sessionActive || isAdmin || state.tableType === 'open') && (isAdmin || !breakActive)
+  const canStart   = myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired && !hasHandEverStartedRef.current && !breakPendingHandEnd && !breakActive
 
   // Can I afford to call? If not, only all-in or fold is possible.
   const mustGoAllIn = !canCheck && callAmt > myStack
@@ -1120,6 +1135,20 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
   }, [sessionInfo])
+
+  // Break local countdown (interpolates between server syncs)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!breakInfo) { setBreakCountdownDisplay(0); setBreakDurationDisplay(0); return }
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - breakInfo.syncedAt) / 1000)
+      setBreakCountdownDisplay(Math.max(0, breakInfo.countdownSecondsRemaining - elapsed))
+      setBreakDurationDisplay(Math.max(0, breakInfo.breakSecondsRemaining - elapsed))
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [breakInfo])
 
   // Fullscreen change listener
   useEffect(() => {
@@ -1523,6 +1552,23 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         setSessionInfo(info)
       }
 
+      const onBreakUpdate = (p: BreakStatePayload) => {
+        if (!active || p.tableId !== initialState.tableId) return
+        if (p.phase === null) {
+          breakRef.current = null
+          setBreakInfo(null)
+          return
+        }
+        const info: BreakDisplayInfo = {
+          phase: p.phase,
+          countdownSecondsRemaining: p.countdownSecondsRemaining,
+          breakSecondsRemaining: p.breakSecondsRemaining,
+          syncedAt: Date.now(),
+        }
+        breakRef.current = info
+        setBreakInfo(info)
+      }
+
       const onKickedFromTable = (p: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => {
         if (!active || p.tableId !== initialState.tableId) return
         const msg = p.reason === 'out_of_chips'
@@ -1553,6 +1599,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('runout_cards_revealed', onRunoutCardsRevealed)
       socket.on('hand_revealed', onHandRevealed)
       socket.on('session_update', onSessionUpdate)
+      socket.on('break_update', onBreakUpdate)
       socket.on('kicked_from_table', onKickedFromTable)
       socket.on('table_chat_message', onChatMessage)
 
@@ -1568,7 +1615,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('showdown_result', onShowdownResult); socket.off('action_result', onActionResult)
         socket.off('turn_timer_start', onTurnTimerStart); socket.off('next_hand_countdown', onNextHandCountdown)
         socket.off('runout_cards_revealed', onRunoutCardsRevealed); socket.off('hand_revealed', onHandRevealed)
-        socket.off('session_update', onSessionUpdate); socket.off('kicked_from_table', onKickedFromTable)
+        socket.off('session_update', onSessionUpdate); socket.off('break_update', onBreakUpdate)
+        socket.off('kicked_from_table', onKickedFromTable)
         socket.off('table_chat_message', onChatMessage)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
         heroCardTimersRef.current.forEach(clearTimeout); heroCardTimersRef.current = []
@@ -1912,6 +1960,19 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           <span style={{ color: 'white', fontWeight: 700, fontSize: 15, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {state.tableName}
           </span>
+          {state.gameMode === 'sit_go' && (
+            <span style={{
+              background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)',
+              borderRadius: 5, padding: '2px 8px', color: '#6ee7b7',
+              fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', textTransform: 'capitalize',
+            }}>
+              Sit & Go
+              {state.prizePool != null && ` · Prize Pool: ${state.prizePool.toLocaleString()}`}
+              {state.blindLevel != null && ` · Level ${state.blindLevel}`}
+              {` · Blinds: ${state.smallBlind.toLocaleString()} / ${state.bigBlind.toLocaleString()}`}
+              {state.sitGoStatus && ` · Status: ${state.sitGoStatus}`}
+            </span>
+          )}
           {hand && (
             <span style={{ background: PHASE_BG[hand.phase] ?? '#374151', color: 'white', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
               {PHASE_LABEL[hand.phase] ?? hand.phase}
@@ -1962,6 +2023,18 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               </span>
             )
           )}
+          {/* Break badge */}
+          {breakInfo && (
+            <span className="tbl-hide-mobile" style={{
+              background: 'rgba(234,179,8,0.12)', border: '1px solid rgba(234,179,8,0.35)',
+              borderRadius: 5, padding: '2px 8px', color: '#fde68a',
+              fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', fontFamily: 'monospace',
+            }}>
+              {breakInfo.phase === 'countdown' && `⏸ Break starts in ${breakCountdownDisplay}s`}
+              {breakInfo.phase === 'awaiting_hand_end' && '⏸ Break will start after this hand'}
+              {breakInfo.phase === 'active' && `⏸ Break time — ${formatSessionTime(breakDurationDisplay)}`}
+            </span>
+          )}
           <button
             onClick={toggleChat}
             title={chatOpen ? 'Hide chat' : 'Show chat'}
@@ -2009,9 +2082,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             )}
           </button>
           <button
-            onClick={canLeave ? handleLeave : () => setSocketError('Session in progress — you cannot leave until the session ends.')}
+            onClick={canLeave ? handleLeave : () => setSocketError(breakActive ? 'Break in progress — you must stay seated until it ends.' : 'Session in progress — you cannot leave until the session ends.')}
             disabled={leaving}
-            title={canLeave ? undefined : 'Locked during session'}
+            title={canLeave ? undefined : breakActive ? 'Locked during break' : 'Locked during session'}
             style={{
               background: canLeave ? '#1a0a0a' : '#0f1a10',
               border: `1px solid ${canLeave ? '#3f1010' : '#1a3a1a'}`,
@@ -2033,6 +2106,23 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           }} title={connected ? 'Live' : 'Reconnecting…'} />
         </div>
       </header>
+
+      {/* Sit & Go tournament-over banner. The winner is the sole occupied seat
+          that isn't marked eliminated — no extra payload field needed since
+          eliminated is already tracked per seat. */}
+      {state.gameMode === 'sit_go' && state.sitGoStatus === 'finished' && (() => {
+        const winnerSeat = state.seats.find(s => s.playerId !== null && !s.eliminated)
+        return (
+          <div style={{
+            background: 'rgba(16,185,129,0.1)', borderBottom: '1px solid rgba(16,185,129,0.3)',
+            padding: '6px 16px', textAlign: 'center',
+            color: '#6ee7b7', fontSize: 12, fontWeight: 700,
+          }}>
+            🏆 Tournament finished — {winnerSeat?.username ?? 'Winner'} takes the prize pool
+            {state.prizePool != null && ` of ${state.prizePool.toLocaleString()}`}
+          </div>
+        )
+      })()}
 
       {/* ── Hand result / previous hand history panel ──────────────────────── */}
       {showPrevHand && (showdownResult || prevHandResult) && (
@@ -2222,6 +2312,22 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               ...({ '--mscale': mobileDensityScale(max) } as React.CSSProperties),
             }}>
 
+              {/* Break overlay — shown for the full 10-minute active break */}
+              {breakActive && (
+                <div style={{
+                  position: 'absolute', inset: 0, zIndex: 40, borderRadius: '50%',
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  background: 'rgba(5,8,15,0.65)', pointerEvents: 'none',
+                }}>
+                  <span style={{ fontSize: 'clamp(18px,3vw,26px)', fontWeight: 800, color: '#fde68a', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                    Break Time
+                  </span>
+                  <span style={{ fontFamily: 'monospace', fontSize: 'clamp(24px,5vw,36px)', fontWeight: 700, color: '#fef3c7' }}>
+                    {formatSessionTime(breakDurationDisplay)}
+                  </span>
+                </div>
+              )}
+
               {/* Ambient glow */}
               <div style={{
                 position: 'absolute', top: '-4%', left: '-4%', right: '-4%', bottom: '-4%',
@@ -2348,6 +2454,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                 const isBB     = occ && hand?.bigBlindSeatNumber === seat.seatNumber
                 const folded   = hp?.playerPhase === 'folded'
                 const allIn    = hp?.playerPhase === 'all-in'
+                const eliminated = seat.eliminated === true
                 // Buffered copy of roundContribution — see visiblePiles for why the static
                 // pile can't read straight off hp.roundContribution. layoutPreview is a static
                 // mock with no socket-driven effect to populate visiblePiles, so it reads direct.
@@ -2357,7 +2464,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                   (showdownResult.pots[0]?.winners ?? []).includes(seat.playerId)
                 const showTmr  = isTurn && turnTimerInfo?.playerId === seat.playerId && timeLeft > 0
                 const lastAct  = seat.playerId ? lastActions[seat.playerId] : null
-                const dimmed   = folded || sdFolded
+                const dimmed   = folded || sdFolded || eliminated
 
                 // Fixed mobile-landscape preset class — pins the pod by its
                 // rail-side edge and orders its content (avatar/cards/pill)
@@ -2453,10 +2560,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                           ) : null
                         ) : null
 
-                        // Seat pill text
+                        // Seat pill text — eliminated takes priority over any transient action.
                         let pillAction = ''
                         let pillColor = '#6b7280'
-                        if (isTurn && isMe) { pillAction = 'YOUR TURN'; pillColor = '#86efac' }
+                        if (eliminated) { pillAction = 'Eliminated'; pillColor = '#ef4444' }
+                        else if (isTurn && isMe) { pillAction = 'YOUR TURN'; pillColor = '#86efac' }
                         else if (lastAct)   { pillAction = formatAction(lastAct); pillColor = actionLabelColor(lastAct.action) }
                         else if (allIn)     { pillAction = 'All-In';  pillColor = '#fdba74' }
                         else if (folded || sdFolded) { pillAction = 'Folded'; pillColor = '#fca5a5' }
@@ -2465,7 +2573,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         let displayName = seat.username ?? ''
                         if (showBlindLabels && isSB) displayName += ' · SB'
                         if (showBlindLabels && isBB) displayName += ' · BB'
-                        const stackDisplay = hp ? formatNumber(hp.stack) : sdP ? formatNumber(sdP.finalStack) : '—'
+                        const stackDisplay = eliminated ? formatNumber(0) : hp ? formatNumber(hp.stack) : sdP ? formatNumber(sdP.finalStack) : '—'
 
                         // Shared avatar circle
                         const avatarCircle = (
@@ -2522,7 +2630,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                               {displayName}
                             </div>
                             <div className="tbl-seat-pill-stack" style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 12, fontWeight: 600, color: '#e8c97a', letterSpacing: '-0.3px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                              <MiniChip amount={hp?.stack ?? sdP?.finalStack ?? 0} size={10} />
+                              <MiniChip amount={eliminated ? 0 : hp?.stack ?? sdP?.finalStack ?? 0} size={10} />
                               {stackDisplay}
                             </div>
                             {pillAction && (
@@ -3322,7 +3430,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
                       {!hand && !canStart && !showdownResult && myStatus === 'seated' && (
                         <p style={{ color: '#475569', fontSize: 12 }}>
-                          {seatedCnt < 2 ? 'Waiting for more players…' : nextHandIn != null ? `Next hand in ${nextHandIn}s…` : 'Waiting for hand to start…'}
+                          {breakActive
+                            ? `Break time — resumes in ${formatSessionTime(breakDurationDisplay)}`
+                            : breakPendingHandEnd
+                            ? 'Break will start after this hand.'
+                            : seatedCnt < 2 ? 'Waiting for more players…' : nextHandIn != null ? `Next hand in ${nextHandIn}s…` : 'Waiting for hand to start…'}
                         </p>
                       )}
                       {hand && myStatus === 'seated' && !isMyTurn && myHP?.playerPhase !== 'active' && (

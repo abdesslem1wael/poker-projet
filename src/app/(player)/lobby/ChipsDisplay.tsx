@@ -29,8 +29,8 @@ export default function ChipsDisplay({ initialChips }: { initialChips: number | 
   }, [])
 
   return (
-    <p className="mt-1 text-lg font-bold tabular-nums text-amber-400">
-      {chips != null ? chips.toLocaleString() : '—'}
+    <p className="text-sm font-bold tabular-nums text-amber-400">
+      {chips != null ? chips.toLocaleString('en-US') : '—'}
     </p>
   )
 }

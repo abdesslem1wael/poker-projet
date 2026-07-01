@@ -17,6 +17,10 @@ type TableRow = {
   max_players: number
   table_type: 'timer' | 'open'
   status: string
+  game_mode: 'cash' | 'sit_go'
+  prize_pool: number | null
+  sit_go_status: 'registering' | 'ready' | 'running' | 'finished' | null
+  blind_level: number
 }
 
 type PlayerRow = {
@@ -35,7 +39,7 @@ export async function getTableState(
 ): Promise<TableStatePayload | null> {
   const { data: tableData } = await supabase
     .from('poker_tables')
-    .select('id, name, small_blind, big_blind, max_players, table_type, status')
+    .select('id, name, small_blind, big_blind, max_players, table_type, status, game_mode, prize_pool, sit_go_status, blind_level')
     .eq('id', tableId)
     .single()
 
@@ -62,6 +66,21 @@ export async function getTableState(
     }
   }
 
+  // Sit & Go only — lets seats show an "Eliminated" badge for busted players
+  // who stay visually seated instead of being removed from table_players.
+  const eliminatedIds = new Set<string>()
+  if (table.game_mode === 'sit_go' && playerIds.length > 0) {
+    const { data: eliminatedRows } = await supabase
+      .from('sit_go_registrations')
+      .select('player_id')
+      .eq('table_id', tableId)
+      .eq('status', 'eliminated')
+      .in('player_id', playerIds)
+    for (const r of (eliminatedRows as Array<{ player_id: string }> | null) ?? []) {
+      eliminatedIds.add(r.player_id)
+    }
+  }
+
   const seatMap = new Map<number, { playerId: string; username: string; avatarId: number | null }>()
   const spectators: SpectatorInfo[] = []
 
@@ -84,6 +103,7 @@ export async function getTableState(
       playerId: occupant?.playerId ?? null,
       username: occupant?.username ?? null,
       avatarId: occupant?.avatarId ?? null,
+      eliminated: occupant != null && eliminatedIds.has(occupant.playerId),
     }
   })
 
@@ -98,6 +118,10 @@ export async function getTableState(
     seats,
     spectators,
     handState: null,  // populated by GameManager in the socket server
+    gameMode: table.game_mode,
+    prizePool: table.prize_pool,
+    sitGoStatus: table.sit_go_status,
+    blindLevel: table.game_mode === 'sit_go' ? table.blind_level : null,
   }
 }
 
@@ -177,13 +201,50 @@ export async function joinTable(
 
   const { data: tableData } = await supabase
     .from('poker_tables')
-    .select('max_players, status')
+    .select('max_players, status, game_mode, sit_go_status')
     .eq('id', tableId)
     .single()
 
   if (!tableData) return { error: 'Table not found' }
-  const table = tableData as { max_players: number; status: string }
+  const table = tableData as {
+    max_players: number
+    status: string
+    game_mode: 'cash' | 'sit_go'
+    sit_go_status: 'registering' | 'ready' | 'running' | 'finished' | null
+  }
   if (table.status === 'closed') return { error: 'Table is closed' }
+
+  if (table.game_mode === 'sit_go') {
+    if (table.sit_go_status === 'registering') {
+      return { error: 'This Sit & Go has not started yet — register and wait for it to fill.' }
+    }
+    if (table.sit_go_status === 'finished') {
+      return { error: 'This Sit & Go has already finished.' }
+    }
+
+    const { data: registrationData } = await supabase
+      .from('sit_go_registrations')
+      .select('id')
+      .eq('table_id', tableId)
+      .eq('player_id', userId)
+      .maybeSingle()
+
+    if (!registrationData) {
+      return { error: 'You are not registered for this Sit & Go.' }
+    }
+
+    // First registered player to enter the table room starts the tournament
+    // clock. Guarded on the current value so only that first transition
+    // actually writes — later joins/rejoins see sit_go_status already
+    // 'running' and this becomes a no-op.
+    if (table.sit_go_status === 'ready') {
+      await supabase
+        .from('poker_tables')
+        .update({ sit_go_status: 'running' })
+        .eq('id', tableId)
+        .eq('sit_go_status', 'ready')
+    }
+  }
 
   // Check for an existing active entry for THIS user only — never reuse another player's row.
   const { data: existingData } = await supabase

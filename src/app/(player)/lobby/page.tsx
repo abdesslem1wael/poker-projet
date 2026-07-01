@@ -1,11 +1,11 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import { logoutAction } from '@/app/actions/auth'
-import SocketStatus from './SocketStatus'
-import TableCard from './TableCard'
-import SettingsModal from './SettingsModal'
+import LobbyTabs from './LobbyTabs'
 import PasswordChangeModal from './PasswordChangeModal'
 import ChipsDisplay from './ChipsDisplay'
+import SettingsModal from './SettingsModal'
+import SocketStatus from './SocketStatus'
 
 type TableRow = {
   id: string
@@ -15,6 +15,17 @@ type TableRow = {
   max_players: number
   table_type: 'timer' | 'open'
   status: 'waiting' | 'active'
+  game_mode: 'cash' | 'sit_go'
+  buy_in: number | null
+  starting_stack: number | null
+  prize_pool: number | null
+  sit_go_status: 'registering' | 'ready' | 'running' | 'finished' | null
+  blind_level: number
+}
+
+type RegistrationRow = {
+  table_id: string
+  player_id: string
 }
 
 type Profile = {
@@ -41,7 +52,7 @@ export default async function LobbyPage() {
     supabase.from('profiles').select('username, role, must_change_password').eq('id', user.id).single(),
     supabase.from('wallets').select('chips').eq('user_id', user.id).single(),
     supabase.from('poker_tables')
-      .select('id, name, small_blind, big_blind, max_players, table_type, status')
+      .select('id, name, small_blind, big_blind, max_players, table_type, status, game_mode, buy_in, starting_stack, prize_pool, sit_go_status, blind_level')
       .in('status', ['waiting', 'active'])
       .order('created_at', { ascending: false }),
   ])
@@ -52,52 +63,72 @@ export default async function LobbyPage() {
 
   if (profile?.role === 'admin') redirect('/admin/dashboard')
 
+  const cashTables = tables.filter((t) => t.game_mode !== 'sit_go')
+  const sitGoIds = tables.filter((t) => t.game_mode === 'sit_go').map((t) => t.id)
+
+  const { data: registrationsData } = sitGoIds.length > 0
+    ? await supabase.from('sit_go_registrations').select('table_id, player_id').in('table_id', sitGoIds)
+    : { data: [] as RegistrationRow[] }
+
+  const registrations = (registrationsData as RegistrationRow[] | null) ?? []
+  const countByTable = new Map<string, number>()
+  const registeredByUser = new Set<string>()
+  for (const r of registrations) {
+    countByTable.set(r.table_id, (countByTable.get(r.table_id) ?? 0) + 1)
+    if (r.player_id === user.id) registeredByUser.add(r.table_id)
+  }
+
+  const sitGoTables = tables
+    .filter((t) => t.game_mode === 'sit_go')
+    .map((t) => ({
+      id: t.id,
+      name: t.name,
+      buy_in: t.buy_in ?? 0,
+      starting_stack: t.starting_stack ?? 0,
+      small_blind: t.small_blind,
+      big_blind: t.big_blind,
+      max_players: t.max_players,
+      prize_pool: t.prize_pool ?? 0,
+      sit_go_status: t.sit_go_status ?? 'registering',
+      registeredCount: countByTable.get(t.id) ?? 0,
+      isRegistered: registeredByUser.has(t.id),
+      blind_level: t.blind_level,
+    }))
+
   return (
     // overflow-x-hidden guards against any child accidentally stretching the viewport
     <main className="min-h-screen overflow-x-hidden bg-zinc-950 text-zinc-100">
       {profile?.must_change_password && <PasswordChangeModal />}
 
       {/*
-        Header — sticky so it stays visible while scrolling.
-
-        padding-top: env(safe-area-inset-top) pushes the content row below the
-        iOS status bar (clock / battery / signal) when the app runs as a PWA
-        with viewportFit=cover + statusBarStyle=black-translucent.
-
-        Layout: left section (logo + dot indicator) flex-1 min-w-0 so it can
-        compress if needed; right section shrink-0 so buttons never wrap or
-        disappear.  The SocketStatus label is hidden below sm to keep the total
-        header width under 288 px on iPhone SE (320 px viewport).
+        Top bar — sticky so it stays visible while scrolling. padding-top pushes
+        content below the iOS status bar when running as a PWA. Deliberately
+        minimal: logo, connection dot, settings, sign out. No player identity.
       */}
       <header
-        className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-900/90 backdrop-blur"
+        className="sticky top-0 z-20 border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur"
         style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <div className="flex items-center justify-between gap-3 px-4 py-3">
-
-          {/* Left — logo + connection dot */}
-          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-            <span className="shrink-0 text-base font-black tracking-tight text-zinc-100">
-              ♠ Poker
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="shrink-0 text-lg font-black tracking-tight text-emerald-500">♠</span>
+            <span className="shrink-0 truncate text-base font-black tracking-tight text-zinc-100">
+              Poker
             </span>
             <SocketStatus />
           </div>
 
-          {/* Right — actions; shrink-0 so they never get crushed */}
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1">
             <SettingsModal currentUsername={profile?.username ?? ''} />
             <form action={logoutAction}>
               <button
                 type="submit"
-                className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-300 transition-colors active:bg-zinc-800"
+                className="rounded-lg border border-zinc-800 px-2.5 py-1.5 text-xs font-semibold text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-200 active:bg-zinc-800"
               >
-                {/* Full label on ≥ sm, abbreviated on phones */}
-                <span className="hidden sm:inline">Sign out</span>
-                <span className="sm:hidden">Out</span>
+                Sign out
               </button>
             </form>
           </div>
-
         </div>
       </header>
 
@@ -107,44 +138,28 @@ export default async function LobbyPage() {
         iOS home indicator; falls back to 40 px on devices without it.
       */}
       <div
-        className="space-y-5 px-4 py-5"
+        className="mx-auto max-w-2xl space-y-5 px-4 py-5"
         style={{ paddingBottom: 'max(40px, env(safe-area-inset-bottom, 0px))' }}
       >
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-xl font-black tracking-tight text-zinc-100">Poker Lobby</h1>
 
-        {/* Player chip card */}
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="min-w-0 rounded-xl bg-zinc-800/60 px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Player</p>
-              <p className="mt-1 truncate text-lg font-bold text-zinc-100">
-                {profile?.username ?? '—'}
-              </p>
-            </div>
-            <div className="rounded-xl bg-zinc-800/60 px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Chips</p>
+          {/* Small chips balance card */}
+          <div className="flex shrink-0 items-center gap-2 rounded-xl border border-zinc-800 bg-gradient-to-b from-zinc-900 to-zinc-900/60 px-3.5 py-2 ring-1 ring-amber-500/10">
+            <span className="text-base leading-none">🪙</span>
+            <div className="text-right leading-tight">
+              <p className="text-[9px] font-semibold uppercase tracking-wider text-zinc-500">Chips</p>
               <ChipsDisplay initialChips={wallet?.chips ?? null} />
             </div>
           </div>
-        </section>
+        </div>
 
-        {/* Tables list */}
-        <section>
-          <h2 className="mb-3 text-base font-bold text-zinc-100">Available Tables</h2>
-
-          {tables.length === 0 ? (
-            <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-800 py-16 text-center">
-              <p className="text-zinc-500">No tables open right now.</p>
-              <p className="mt-1 text-sm text-zinc-600">Ask an admin to create one.</p>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {tables.map((t) => (
-                <TableCard key={t.id} table={t} canJoin={profile?.role !== 'super_admin'} />
-              ))}
-            </div>
-          )}
-        </section>
-
+        <LobbyTabs
+          cashTables={cashTables}
+          sitGoTables={sitGoTables}
+          canJoin={profile?.role !== 'super_admin'}
+          playerChips={wallet?.chips ?? 0}
+        />
       </div>
     </main>
   )

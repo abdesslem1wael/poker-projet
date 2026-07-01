@@ -15,6 +15,7 @@ import {
 } from './src/lib/socket/table-session'
 import { GameManager } from './src/lib/socket/game-manager'
 import { SessionManager } from './src/lib/socket/session-manager'
+import { BreakManager, BREAK_COUNTDOWN_MS, BREAK_DURATION_MS } from './src/lib/socket/break-manager'
 import { computeShowdown } from './src/lib/socket/showdown-helper'
 import type { HandEndedData } from './src/lib/socket/game-types'
 import type {
@@ -36,6 +37,7 @@ const handle = nextApp.getRequestHandler()
 // Single game manager instance — lives for the lifetime of the process.
 const gm = new GameManager()
 const sm = new SessionManager()
+const bm = new BreakManager()
 
 // ── Module-level helpers ───────────────────────────────────────────────────
 
@@ -46,30 +48,53 @@ async function buildTableState(supabase: any, tableId: string): Promise<TableSta
   return { ...base, handState: gm.getPublicHandState(tableId) }
 }
 
+// Returns whether the table is a Sit & Go, so the caller (handleHandEnd) can
+// branch its post-hand elimination logic without a second game_mode lookup.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function persistHandResult(supabase: any, data: HandEndedData, showdown: ShowdownPayload): Promise<void> {
-  // 1. Update each player's wallet to their final stack.
-  for (const p of showdown.players) {
-    const { error } = await supabase
-      .from('wallets')
-      .update({ chips: p.finalStack, updated_at: new Date().toISOString() })
-      .eq('user_id', p.playerId)
-    if (error) console.error(`[persist] wallet update failed  user=${p.playerId}`, error)
-  }
+async function persistHandResult(supabase: any, data: HandEndedData, showdown: ShowdownPayload): Promise<boolean> {
+  const { data: tableRow } = await supabase
+    .from('poker_tables')
+    .select('game_mode')
+    .eq('id', showdown.tableId)
+    .single()
+  const isSitGo = (tableRow as { game_mode?: string } | null)?.game_mode === 'sit_go'
 
-  // 2. Insert win/loss transactions (amount > 0 constraint — skip break-even).
-  for (const p of showdown.players) {
-    const contribution = data.players.find(hp => hp.playerId === p.playerId)!.totalContributed
-    const netGain = p.chipDelta - contribution
-    if (netGain === 0) continue
+  if (isSitGo) {
+    // Tournament stacks live in sit_go_registrations.current_stack, never the
+    // wallet — the buy-in was already deducted at registration (Step 2) and no
+    // real money moves hand-to-hand, so wallets/transactions stay untouched.
+    for (const p of showdown.players) {
+      const { error } = await supabase
+        .from('sit_go_registrations')
+        .update({ current_stack: p.finalStack })
+        .eq('table_id', showdown.tableId)
+        .eq('player_id', p.playerId)
+      if (error) console.error(`[persist] sit_go stack update failed  user=${p.playerId}`, error)
+    }
+  } else {
+    // 1. Update each player's wallet to their final stack.
+    for (const p of showdown.players) {
+      const { error } = await supabase
+        .from('wallets')
+        .update({ chips: p.finalStack, updated_at: new Date().toISOString() })
+        .eq('user_id', p.playerId)
+      if (error) console.error(`[persist] wallet update failed  user=${p.playerId}`, error)
+    }
 
-    const { error } = await supabase.from('transactions').insert({
-      user_id: p.playerId,
-      amount: Math.abs(netGain),
-      type: netGain > 0 ? 'win' : 'loss',
-      note: `Hand #${data.handNumber}`,
-    })
-    if (error) console.error(`[persist] transaction insert failed  user=${p.playerId}`, error)
+    // 2. Insert win/loss transactions (amount > 0 constraint — skip break-even).
+    for (const p of showdown.players) {
+      const contribution = data.players.find(hp => hp.playerId === p.playerId)!.totalContributed
+      const netGain = p.chipDelta - contribution
+      if (netGain === 0) continue
+
+      const { error } = await supabase.from('transactions').insert({
+        user_id: p.playerId,
+        amount: Math.abs(netGain),
+        type: netGain > 0 ? 'win' : 'loss',
+        note: `Hand #${data.handNumber}`,
+      })
+      if (error) console.error(`[persist] transaction insert failed  user=${p.playerId}`, error)
+    }
   }
 
   // 3. Save hand history (tip amount stored in result_json for admin review).
@@ -99,6 +124,164 @@ async function persistHandResult(supabase: any, data: HandEndedData, showdown: S
     chip_deltas_json: chipDeltasJson,
   })
   if (histErr) console.error('[persist] game_history insert failed', histErr)
+
+  return isSitGo
+}
+
+type SitGoEliminationResult = {
+  tournamentFinished: boolean
+  payout?: { winnerId: string; newChips: number }
+}
+
+// Marks any Sit & Go registration that just busted (current_stack already
+// persisted as 0 by persistHandResult) as 'eliminated', then checks whether
+// one registered, non-eliminated player remains. If so the tournament is
+// over: flip sit_go_status to 'finished', mark that registration 'winner',
+// and pay the table's prize_pool straight into their wallet.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function handleSitGoElimination(supabase: any, tableId: string, showdown: ShowdownPayload): Promise<SitGoEliminationResult> {
+  const eliminatedIds = showdown.players.filter(p => p.finalStack <= 0).map(p => p.playerId)
+
+  if (eliminatedIds.length > 0) {
+    const { error } = await supabase
+      .from('sit_go_registrations')
+      .update({ status: 'eliminated' })
+      .eq('table_id', tableId)
+      .in('player_id', eliminatedIds)
+      .eq('status', 'registered')
+    if (error) console.error(`[sitgo] elimination update failed  table=${tableId}`, error)
+    else console.log(`[sitgo] eliminated: ${eliminatedIds.join(', ')}  table=${tableId}`)
+  }
+
+  const { data: regRows } = await supabase
+    .from('sit_go_registrations')
+    .select('player_id, status, current_stack')
+    .eq('table_id', tableId)
+
+  const regs = (regRows as Array<{ player_id: string; status: string; current_stack: number }> | null) ?? []
+  const remaining = regs.filter(r => r.status === 'registered' && r.current_stack > 0)
+
+  if (remaining.length > 1) return { tournamentFinished: false }
+
+  // Guarded on the current value so only the first hand to detect the finish
+  // actually flips it — a second call (should never happen; hands are
+  // processed sequentially per table) would see zero rows returned here and
+  // skip paying out again.
+  const { data: finishedRows } = await supabase
+    .from('poker_tables')
+    .update({ sit_go_status: 'finished' })
+    .eq('id', tableId)
+    .neq('sit_go_status', 'finished')
+    .select('prize_pool, name')
+
+  const finishedRow = ((finishedRows as Array<{ prize_pool: number; name: string }> | null) ?? [])[0]
+  if (!finishedRow) {
+    // Already finished by an earlier hand — payout (if any) already happened.
+    return { tournamentFinished: true }
+  }
+
+  console.log(`[sitgo] tournament finished  table=${tableId} remaining=${remaining.length}`)
+
+  if (remaining.length !== 1) {
+    // Chip-conservation makes this practically unreachable (someone always
+    // holds the chips that were in play), but never guess at a winner.
+    console.error(`[sitgo] finished with ${remaining.length} eligible winners — skipping payout  table=${tableId}`)
+    return { tournamentFinished: true }
+  }
+
+  const winnerId = remaining[0].player_id
+  const prizePool = finishedRow.prize_pool
+
+  if (!prizePool || prizePool <= 0) {
+    return { tournamentFinished: true }
+  }
+
+  // Guarded the same way — only the transition to 'winner' actually pays.
+  const { data: winnerRows } = await supabase
+    .from('sit_go_registrations')
+    .update({ status: 'winner' })
+    .eq('table_id', tableId)
+    .eq('player_id', winnerId)
+    .eq('status', 'registered')
+    .select('id')
+
+  if (!((winnerRows as Array<{ id: string }> | null) ?? []).length) {
+    console.log(`[sitgo] winner already paid  table=${tableId} winner=${winnerId}`)
+    return { tournamentFinished: true }
+  }
+
+  const { data: walletRow } = await supabase
+    .from('wallets')
+    .select('chips')
+    .eq('user_id', winnerId)
+    .single()
+
+  const currentChips = (walletRow as { chips: number } | null)?.chips ?? 0
+  const newChips = currentChips + prizePool
+
+  const { error: walletErr } = await supabase
+    .from('wallets')
+    .update({ chips: newChips, updated_at: new Date().toISOString() })
+    .eq('user_id', winnerId)
+
+  if (walletErr) {
+    console.error(`[sitgo] prize payout wallet update failed  table=${tableId} winner=${winnerId}`, walletErr)
+    return { tournamentFinished: true }
+  }
+
+  const { error: txError } = await supabase.from('transactions').insert({
+    user_id: winnerId,
+    amount: prizePool,
+    type: 'win',
+    note: `Sit & Go prize pool: ${finishedRow.name}`,
+  })
+  if (txError) console.error(`[sitgo] prize payout transaction insert failed  table=${tableId} winner=${winnerId}`, txError)
+
+  console.log(`[sitgo] paid prize pool  table=${tableId} winner=${winnerId} amount=${prizePool}`)
+
+  return { tournamentFinished: true, payout: { winnerId, newChips } }
+}
+
+// Hand-based blind levels for Sit & Go tables (Step 6). small_blind/big_blind
+// on poker_tables are treated as the CURRENT blinds — doStartHand() already
+// reads them fresh at the start of every hand, so bumping them here is all
+// that's needed; no change to GameManager or the hand-dealing flow.
+// Multiplier schedule is 1-indexed by level (index 0 = level 1, unused level 0).
+const SIT_GO_BLIND_MULTIPLIERS = [1, 2, 3, 5, 8, 12, 20]
+const SIT_GO_HANDS_PER_LEVEL = 5
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function advanceSitGoBlinds(supabase: any, tableId: string): Promise<void> {
+  const { data: tableRow } = await supabase
+    .from('poker_tables')
+    .select('sit_go_hands_completed, blind_level, original_small_blind, original_big_blind')
+    .eq('id', tableId)
+    .single()
+
+  if (!tableRow) return
+  const row = tableRow as {
+    sit_go_hands_completed: number
+    blind_level: number
+    original_small_blind: number | null
+    original_big_blind: number | null
+  }
+
+  const handsCompleted = row.sit_go_hands_completed + 1
+  const maxLevel = SIT_GO_BLIND_MULTIPLIERS.length
+  const newLevel = Math.min(Math.floor(handsCompleted / SIT_GO_HANDS_PER_LEVEL) + 1, maxLevel)
+
+  const update: Record<string, unknown> = { sit_go_hands_completed: handsCompleted }
+
+  if (newLevel !== row.blind_level && row.original_small_blind && row.original_big_blind) {
+    const multiplier = SIT_GO_BLIND_MULTIPLIERS[newLevel - 1]
+    update.blind_level = newLevel
+    update.small_blind = row.original_small_blind * multiplier
+    update.big_blind = row.original_big_blind * multiplier
+    console.log(`[sitgo] blind level up  table=${tableId} level=${newLevel} blinds=${update.small_blind}/${update.big_blind}`)
+  }
+
+  const { error } = await supabase.from('poker_tables').update(update).eq('id', tableId)
+  if (error) console.error(`[sitgo] blind level update failed  table=${tableId}`, error)
 }
 
 nextApp.prepare().then(() => {
@@ -291,44 +474,88 @@ nextApp.prepare().then(() => {
     console.log(
       `[game] hand ended  table=${tableId} reason=${data.reason} hand=${data.handNumber} tip=${data.tipAmount}`,
     )
+
+    let isSitGo = false
     try {
-      await persistHandResult(supabase, data, showdown)
+      isSitGo = await persistHandResult(supabase, data, showdown)
     } catch (err) {
       console.error('[game] Failed to persist hand result:', err)
     }
 
-    // Kick broke players off the table immediately using the showdown result —
-    // never rely on the wallet re-read in doStartHand, which would miss a failed
-    // wallet write. Kicked players must be re-added chips by an admin before they
-    // can rejoin via the normal Join Table flow.
-    const brokePlayers = showdown.players.filter(p => p.finalStack === 0)
-    if (brokePlayers.length > 0) {
-      await Promise.all(brokePlayers.map(p =>
-        supabase
-          .from('table_players')
-          .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
-          .eq('table_id', tableId)
-          .eq('player_id', p.playerId)
-          .neq('status', 'left')
-      ))
-      console.log(`[game] kicked broke players: ${brokePlayers.map(p => p.username).join(', ')}  table=${tableId}`)
+    let tournamentFinished = false
 
-      // Notify each broke player's sockets so their UI redirects away.
-      const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
-      for (const s of roomSockets) {
-        if (brokePlayers.some(p => p.playerId === s.data.userId)) {
-          s.emit('kicked_from_table', { tableId, reason: 'out_of_chips' })
-          s.data.seatedAtTables.delete(tableId)
-          s.leave(`table:${tableId}`)
+    if (isSitGo) {
+      // Sit & Go: broke players are marked 'eliminated' in sit_go_registrations
+      // but stay seated at the table (they can keep watching) — no kick, no
+      // redirect. doStartHand() excludes them from future hands by registration
+      // status, not by table_players seat status.
+      try {
+        const result = await handleSitGoElimination(supabase, tableId, showdown)
+        tournamentFinished = result.tournamentFinished
+        if (result.payout) {
+          const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
+          for (const s of roomSockets) {
+            if (s.data.userId === result.payout.winnerId) {
+              s.emit('wallet_update', { chips: result.payout.newChips })
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[game] Sit & Go elimination check failed:', err)
+      }
+
+      // Blind levels only advance for hands that complete a still-running
+      // tournament — never mid-hand (this runs after showdown) and never
+      // once the tournament has finished.
+      if (!tournamentFinished) {
+        try {
+          await advanceSitGoBlinds(supabase, tableId)
+        } catch (err) {
+          console.error('[game] Sit & Go blind level advance failed:', err)
         }
       }
-      for (const p of brokePlayers) {
-        disconnectedSeats.get(tableId)?.delete(p.playerId)
+    } else {
+      // Cash games: kick broke players off the table immediately using the
+      // showdown result — never rely on the wallet re-read in doStartHand,
+      // which would miss a failed wallet write. Kicked players must be
+      // re-added chips by an admin before they can rejoin via Join Table.
+      const brokePlayers = showdown.players.filter(p => p.finalStack === 0)
+      if (brokePlayers.length > 0) {
+        await Promise.all(brokePlayers.map(p =>
+          supabase
+            .from('table_players')
+            .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
+            .eq('table_id', tableId)
+            .eq('player_id', p.playerId)
+            .neq('status', 'left')
+        ))
+        console.log(`[game] kicked broke players: ${brokePlayers.map(p => p.username).join(', ')}  table=${tableId}`)
+
+        // Notify each broke player's sockets so their UI redirects away.
+        const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
+        for (const s of roomSockets) {
+          if (brokePlayers.some(p => p.playerId === s.data.userId)) {
+            s.emit('kicked_from_table', { tableId, reason: 'out_of_chips' })
+            s.data.seatedAtTables.delete(tableId)
+            s.leave(`table:${tableId}`)
+          }
+        }
+        for (const p of brokePlayers) {
+          disconnectedSeats.get(tableId)?.delete(p.playerId)
+        }
       }
     }
 
+    const state = await buildTableState(supabase, tableId)
+    if (state) io.to(`table:${tableId}`).emit('table_state', state)
+
     io.to(`table:${tableId}`).emit('showdown_result', showdown)
-    scheduleAutoStart(tableId)
+
+    if (!tournamentFinished) {
+      scheduleAutoStart(tableId)
+    } else {
+      console.log(`[sitgo] no further hands — tournament finished  table=${tableId}`)
+    }
   }
 
   // ── Auto-start next hand ───────────────────────────────────────────────────
@@ -351,22 +578,84 @@ nextApp.prepare().then(() => {
     io.to('admin_room').emit('session_update', payload)
   }
 
-  async function doStartHand(tableId: string): Promise<null | 'too_few' | 'failed' | 'session_expired'> {
+  // ── Break scheduling ───────────────────────────────────────────────────────
+  const breakCountdownTimers = new Map<string, NodeJS.Timeout>()
+  const breakDurationTimers = new Map<string, NodeJS.Timeout>()
+
+  function emitBreakUpdate(tableId: string): void {
+    const payload = bm.toPayload(tableId)
+    io.to(`table:${tableId}`).emit('break_update', payload)
+    io.to('admin_room').emit('break_update', payload)
+  }
+
+  function startBreakFlow(tableId: string): boolean {
+    const started = bm.startBreak(tableId)
+    if (!started) return false
+    emitBreakUpdate(tableId)
+    const t = setTimeout(() => {
+      breakCountdownTimers.delete(tableId)
+      onBreakCountdownElapsed(tableId)
+    }, BREAK_COUNTDOWN_MS)
+    breakCountdownTimers.set(tableId, t)
+    return true
+  }
+
+  function onBreakCountdownElapsed(tableId: string): void {
+    if (gm.hasActiveHand(tableId)) {
+      bm.setAwaitingHandEnd(tableId)
+      emitBreakUpdate(tableId)
+      // scheduleAutoStart() picks this up and activates the break once the hand ends.
+    } else {
+      activateBreak(tableId)
+    }
+  }
+
+  function activateBreak(tableId: string): void {
+    // A hand may have ended between hands right as the countdown hit 0 — cancel
+    // any pending next-hand auto-start so the break actually takes effect.
+    const existingAutoStart = autoStartTimers.get(tableId)
+    if (existingAutoStart !== undefined) { clearTimeout(existingAutoStart); autoStartTimers.delete(tableId) }
+
+    bm.activate(tableId)
+    emitBreakUpdate(tableId)
+    console.log(`[break] active  table=${tableId}`)
+
+    const t = setTimeout(() => {
+      breakDurationTimers.delete(tableId)
+      endBreak(tableId)
+    }, BREAK_DURATION_MS)
+    breakDurationTimers.set(tableId, t)
+  }
+
+  function endBreak(tableId: string): void {
+    bm.end(tableId)
+    emitBreakUpdate(tableId)
+    console.log(`[break] ended  table=${tableId}`)
+    if (!gm.hasActiveHand(tableId)) {
+      scheduleAutoStart(tableId)
+    }
+  }
+
+  async function doStartHand(tableId: string): Promise<null | 'too_few' | 'failed' | 'session_expired' | 'on_break'> {
     if (gm.hasActiveHand(tableId)) return 'failed'
 
     // Block new hands when the session has expired.
     if (sm.isActive(tableId) && sm.isExpired(tableId)) return 'session_expired'
 
+    // Block new hands once the break has moved past the "still playing" countdown phase.
+    const breakPhase = bm.get(tableId)?.phase
+    if (breakPhase === 'awaiting_hand_end' || breakPhase === 'active') return 'on_break'
+
     const { data: tableData } = await supabase
       .from('poker_tables')
-      .select('name, small_blind, big_blind, table_type, status')
+      .select('name, small_blind, big_blind, table_type, status, game_mode')
       .eq('id', tableId)
       .single()
 
     if (!tableData || (tableData as { status: string }).status === 'closed') return 'failed'
 
-    const { name: tableName, small_blind, big_blind, table_type } = tableData as {
-      name: string; small_blind: number; big_blind: number; table_type: 'timer' | 'open'
+    const { name: tableName, small_blind, big_blind, table_type, game_mode } = tableData as {
+      name: string; small_blind: number; big_blind: number; table_type: 'timer' | 'open'; game_mode: 'cash' | 'sit_go'
     }
 
     const { data: playersData } = await supabase
@@ -446,7 +735,7 @@ nextApp.prepare().then(() => {
       profiles.filter(p => p.role !== 'super_admin').map(p => [p.id, p.username]),
     )
 
-    const allSeated = rows.map(r => ({
+    let allSeated = rows.map(r => ({
       playerId: r.player_id,
       seatNumber: r.seat_number,
       username: usernameMap.get(r.player_id) ?? 'Unknown',
@@ -454,11 +743,37 @@ nextApp.prepare().then(() => {
 
     if (allSeated.length < 2) return 'too_few'
 
-    const result = await gm.startHand(tableId, allSeated, supabase, small_blind, big_blind)
+    let stackOverrides: Map<string, number> | undefined
+    if (game_mode === 'sit_go') {
+      const { data: regRows } = await supabase
+        .from('sit_go_registrations')
+        .select('player_id, current_stack, status')
+        .eq('table_id', tableId)
+        .in('player_id', allSeated.map(p => p.playerId))
+
+      const regs = (regRows as Array<{ player_id: string; current_stack: number; status: string }> | null) ?? []
+      stackOverrides = new Map(regs.map(r => [r.player_id, r.current_stack]))
+
+      // Eliminated players stay seated (so they can keep watching) but must
+      // never be dealt into a new hand, post blinds, or affect turn order.
+      const eligibleIds = new Set(
+        regs.filter(r => r.status === 'registered' && r.current_stack > 0).map(r => r.player_id),
+      )
+      const excluded = allSeated.filter(p => !eligibleIds.has(p.playerId))
+      if (excluded.length > 0) {
+        console.log(`[sitgo] excluding eliminated players from hand: ${excluded.map(p => p.username).join(', ')}  table=${tableId}`)
+      }
+      allSeated = allSeated.filter(p => eligibleIds.has(p.playerId))
+
+      if (allSeated.length < 2) return 'too_few'
+    }
+
+    const result = await gm.startHand(tableId, allSeated, supabase, small_blind, big_blind, stackOverrides)
     if ('error' in result) return 'failed'
 
-    // Start the 1-hour session on the very first hand.
-    if (!sm.isActive(tableId)) {
+    // Start the 1-hour session on the very first hand — timer tables only.
+    // Open tables have no time limit so they never get a session.
+    if (table_type !== 'open' && !sm.isActive(tableId)) {
       sm.startSession(tableId, tableName, table_type)
       emitSessionUpdate(tableId)
       console.log(`[session] started  table=${tableId}`)
@@ -489,6 +804,17 @@ nextApp.prepare().then(() => {
     // Don't queue a new hand when the session has expired.
     if (sm.isActive(tableId) && sm.isExpired(tableId)) {
       console.log(`[session] expired — skipping auto-start  table=${tableId}`)
+      return
+    }
+
+    // The hand that just ended was the last one before the break — activate it
+    // now instead of queuing the next hand.
+    const breakPhase = bm.get(tableId)?.phase
+    if (breakPhase === 'awaiting_hand_end') {
+      activateBreak(tableId)
+      return
+    }
+    if (breakPhase === 'active') {
       return
     }
 
@@ -584,8 +910,8 @@ nextApp.prepare().then(() => {
 
     socket.emit('socket_ready', { userId, username })
 
-    // Admins get real-time session updates for all tables.
-    if (socket.data.role === 'admin') {
+    // Admins get real-time session/break updates for all tables.
+    if (socket.data.role === 'admin' || socket.data.role === 'super_admin') {
       socket.join('admin_room')
       for (const session of sm.getAllSessions()) {
         socket.emit('session_update', {
@@ -594,6 +920,9 @@ nextApp.prepare().then(() => {
           secondsRemaining: sm.getSecondsRemaining(session.tableId),
           isExpired: sm.isExpired(session.tableId),
         })
+      }
+      for (const brk of bm.getAllBreaks()) {
+        socket.emit('break_update', bm.toPayload(brk.tableId))
       }
     }
 
@@ -649,6 +978,9 @@ nextApp.prepare().then(() => {
           isExpired: sm.isExpired(tableId),
         })
       }
+
+      // Reconnect: resend current break state (phase:null when no break is running).
+      socket.emit('break_update', bm.toPayload(tableId))
     })
 
     // ── spectate_table ─────────────────────────────────────────────────────
@@ -667,6 +999,8 @@ nextApp.prepare().then(() => {
 
       const state = await buildTableState(supabase, tableId)
       if (state) io.to(`table:${tableId}`).emit('table_state', state)
+
+      socket.emit('break_update', bm.toPayload(tableId))
     })
 
     // ── leave_table ────────────────────────────────────────────────────────
@@ -674,6 +1008,12 @@ nextApp.prepare().then(() => {
       // Block voluntary leaves while the session is running — 'open' tables never lock.
       if (sm.lockLeaving(tableId) && socket.data.role !== 'admin') {
         socket.emit('socket_error', { message: 'Session in progress — you cannot leave until the session ends.' })
+        return
+      }
+
+      // Block voluntary leaves while the break is active — players must stay seated.
+      if (bm.isActive(tableId) && socket.data.role !== 'admin') {
+        socket.emit('socket_error', { message: 'Break in progress — you must stay seated until it ends.' })
         return
       }
 
@@ -708,6 +1048,8 @@ nextApp.prepare().then(() => {
         socket.emit('socket_error', { message: 'Unable to start hand' })
       } else if (err === 'session_expired') {
         socket.emit('socket_error', { message: 'Session has ended — no more hands can be dealt' })
+      } else if (err === 'on_break') {
+        socket.emit('socket_error', { message: 'Table is on break' })
       }
     })
 
@@ -822,6 +1164,20 @@ nextApp.prepare().then(() => {
       }
     })
 
+    // ── start_break ────────────────────────────────────────────────────────
+    socket.on('start_break', ({ tableId }) => {
+      if (socket.data.role !== 'admin' && socket.data.role !== 'super_admin') {
+        socket.emit('socket_error', { message: 'Admin only' })
+        return
+      }
+      const started = startBreakFlow(tableId)
+      if (!started) {
+        socket.emit('socket_error', { message: 'Break already scheduled for this table' })
+        return
+      }
+      console.log(`[break] scheduled  table=${tableId} by=${username}`)
+    })
+
     // ── kick_player ────────────────────────────────────────────────────────
     socket.on('kick_player', async ({ tableId, playerId }) => {
       if (socket.data.role !== 'admin') {
@@ -867,10 +1223,12 @@ nextApp.prepare().then(() => {
       console.log(`[socket] disconnected  user=${username} socket=${socket.id}`)
 
       for (const tableId of socket.data.joinedTables) {
-        const sessionLocked = sm.lockLeaving(tableId)
+        // An active break locks seats in the same way a locked session does —
+        // players must stay seated for the duration of the break.
+        const seatLocked = sm.lockLeaving(tableId) || bm.isActive(tableId)
 
-        if (sessionLocked && socket.data.seatedAtTables.has(tableId)) {
-          // Timer table with an active session: keep the seat reserved.
+        if (seatLocked && socket.data.seatedAtTables.has(tableId)) {
+          // Timer table with an active session (or an active break): keep the seat reserved.
           // Only flag as disconnected if this was their last socket in the room
           // (the socket has already left all rooms before 'disconnect' fires).
           const remainingSockets = await io.in(`table:${tableId}`).fetchSockets()
@@ -880,8 +1238,8 @@ nextApp.prepare().then(() => {
             disconnectedSeats.get(tableId)!.add(userId)
             console.log(`[socket] seat reserved for disconnected player  user=${username} table=${tableId}`)
           }
-        } else if (!gm.hasActiveHand(tableId) && !sessionLocked) {
-          // Open table (or timer table with no session): release the seat.
+        } else if (!gm.hasActiveHand(tableId) && !seatLocked) {
+          // Open table (or timer table with no session/break): release the seat.
           await leaveTable(supabase, tableId, userId)
         }
 
@@ -891,11 +1249,14 @@ nextApp.prepare().then(() => {
     })
   })
 
-  // ── Session countdown broadcast ─────────────────────────────────────────
+  // ── Session / break countdown broadcast ───────────────────────────────────
   // Every 5 s: push the current seconds-remaining to all table rooms + admin.
   setInterval(() => {
     for (const session of sm.getAllSessions()) {
       emitSessionUpdate(session.tableId)
+    }
+    for (const brk of bm.getAllBreaks()) {
+      emitBreakUpdate(brk.tableId)
     }
   }, 5_000)
 

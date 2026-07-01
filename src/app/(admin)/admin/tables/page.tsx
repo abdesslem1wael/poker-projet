@@ -13,6 +13,9 @@ type TableRow = {
   table_type: 'timer' | 'open'
   status: 'waiting' | 'active' | 'closed'
   created_at: string
+  game_mode: 'cash' | 'sit_go'
+  buy_in: number | null
+  prize_pool: number | null
 }
 
 const statusBadge: Record<TableRow['status'], string> = {
@@ -36,7 +39,7 @@ export default async function AdminTablesPage() {
 
   const { data } = await adminClient
     .from('poker_tables')
-    .select('id, name, small_blind, big_blind, max_players, table_type, status, created_at')
+    .select('id, name, small_blind, big_blind, max_players, table_type, status, created_at, game_mode, buy_in, prize_pool')
     .order('created_at', { ascending: false })
 
   const tables = (data as TableRow[] | null) ?? []
@@ -76,8 +79,10 @@ export default async function AdminTablesPage() {
                 <thead>
                   <tr className="border-b border-zinc-800 bg-zinc-800/60">
                     <th className="px-5 py-3 text-left font-medium text-zinc-400">Name</th>
+                    <th className="px-5 py-3 text-left font-medium text-zinc-400">Mode</th>
                     <th className="px-5 py-3 text-right font-medium text-zinc-400">Blinds</th>
                     <th className="px-5 py-3 text-right font-medium text-zinc-400">Max</th>
+                    <th className="px-5 py-3 text-right font-medium text-zinc-400">Buy-in / Prize</th>
                     <th className="px-5 py-3 text-left font-medium text-zinc-400">Type</th>
                     <th className="px-5 py-3 text-left font-medium text-zinc-400">Status</th>
                     <th className="px-5 py-3 text-left font-medium text-zinc-400">Created</th>
@@ -94,11 +99,27 @@ export default async function AdminTablesPage() {
                         className="transition-colors hover:bg-zinc-800/40"
                       >
                         <td className="px-5 py-3 font-medium text-zinc-100">{t.name}</td>
+                        <td className="px-5 py-3">
+                          <span
+                            className={
+                              t.game_mode === 'sit_go'
+                                ? 'inline-flex items-center rounded-full bg-amber-900/40 px-2.5 py-0.5 text-xs font-semibold text-amber-400 border border-amber-800/50'
+                                : 'inline-flex items-center rounded-full bg-zinc-800/60 px-2.5 py-0.5 text-xs font-semibold text-zinc-400 border border-zinc-700/50'
+                            }
+                          >
+                            {t.game_mode === 'sit_go' ? 'Sit & Go' : 'Cash'}
+                          </span>
+                        </td>
                         <td className="px-5 py-3 text-right tabular-nums text-zinc-300">
                           {t.small_blind}/{t.big_blind}
                         </td>
                         <td className="px-5 py-3 text-right tabular-nums text-zinc-300">
                           {t.max_players}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums text-zinc-300">
+                          {t.game_mode === 'sit_go'
+                            ? `${t.buy_in?.toLocaleString()} / ${t.prize_pool?.toLocaleString()}`
+                            : '—'}
                         </td>
                         <td className="px-5 py-3">
                           <span className={typeBadge[t.table_type]}>{t.table_type}</span>

@@ -1,8 +1,10 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getSocket } from '@/lib/socket/client'
+import type { AppSocket } from '@/lib/socket/client'
+import type { BreakStatePayload } from '@/lib/socket/types'
 
 export type LiveTable = {
   id: string
@@ -12,10 +14,87 @@ export type LiveTable = {
   status: 'waiting' | 'active'
 }
 
+type BreakState = BreakStatePayload & { syncedAt: number }
+
+function formatBreakStatus(b: BreakState | undefined, now: number): string | null {
+  if (!b || b.phase === null) return null
+  const elapsed = Math.floor((now - b.syncedAt) / 1000)
+  if (b.phase === 'countdown') {
+    const secs = Math.max(0, b.countdownSecondsRemaining - elapsed)
+    return `Break starts in ${secs}s`
+  }
+  if (b.phase === 'awaiting_hand_end') {
+    return 'Break starts after current hand'
+  }
+  // active
+  const secs = Math.max(0, b.breakSecondsRemaining - elapsed)
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return `Break active ${m}:${s.toString().padStart(2, '0')} remaining`
+}
+
 export default function WatchTablesPanel({ tables }: { tables: LiveTable[] }) {
   const router = useRouter()
   const [loadingId, setLoadingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [socket, setSocket] = useState<AppSocket | null>(null)
+  const [breaks, setBreaks] = useState<Map<string, BreakState>>(new Map())
+  const [breakStartingId, setBreakStartingId] = useState<string | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    let active = true
+
+    getSocket().then((s) => {
+      if (!active) return
+      setSocket(s)
+
+      const onBreakUpdate = (p: BreakStatePayload) => {
+        if (!active) return
+        setBreaks((prev) => {
+          const next = new Map(prev)
+          if (p.phase === null) {
+            next.delete(p.tableId)
+          } else {
+            next.set(p.tableId, { ...p, syncedAt: Date.now() })
+          }
+          return next
+        })
+      }
+      const onSocketError = ({ message }: { message: string }) => {
+        if (!active) return
+        setBreakStartingId(null)
+        setError(message)
+      }
+
+      s.on('break_update', onBreakUpdate)
+      s.on('socket_error', onSocketError)
+      return () => {
+        s.off('break_update', onBreakUpdate)
+        s.off('socket_error', onSocketError)
+      }
+    })
+
+    return () => { active = false }
+  }, [])
+
+  // Local 1s tick so countdowns stay live between server syncs.
+  useEffect(() => {
+    if (breaks.size === 0) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [breaks.size])
+
+  function startBreak(tableId: string) {
+    if (!socket) return
+    setError(null)
+    setBreakStartingId(tableId)
+    socket.emit('start_break', { tableId })
+    // The break_update broadcast (and thus the disappearance of the "Start
+    // Break" button) is what actually clears the loading state; this is just
+    // a safety timeout in case the server never responds.
+    setTimeout(() => setBreakStartingId((id) => (id === tableId ? null : id)), 4000)
+  }
 
   function watch(tableId: string) {
     setLoadingId(tableId)
@@ -88,6 +167,15 @@ export default function WatchTablesPanel({ tables }: { tables: LiveTable[] }) {
                 </p>
               </div>
 
+              {(() => {
+                const breakStatus = formatBreakStatus(breaks.get(t.id), now)
+                return breakStatus ? (
+                  <div className="rounded-lg border border-amber-800/50 bg-amber-900/20 px-3 py-2 text-xs font-semibold text-amber-400">
+                    ⏸ {breakStatus}
+                  </div>
+                ) : null
+              })()}
+
               <button
                 onClick={() => watch(t.id)}
                 disabled={loadingId !== null}
@@ -95,6 +183,17 @@ export default function WatchTablesPanel({ tables }: { tables: LiveTable[] }) {
               >
                 {loadingId === t.id ? 'Connecting…' : 'Watch Table'}
               </button>
+
+              {!breaks.has(t.id) && (
+                <button
+                  onClick={() => startBreak(t.id)}
+                  disabled={breakStartingId !== null || !socket}
+                  title="Start a break for this table"
+                  className="w-full rounded-lg border border-amber-800/50 py-2 text-sm font-semibold text-amber-400 transition-colors hover:bg-amber-900/20 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {breakStartingId === t.id ? 'Starting…' : 'Start Break'}
+                </button>
+              )}
             </div>
           )
         })}

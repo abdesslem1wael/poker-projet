@@ -15,12 +15,25 @@ export default function CreateTableForm() {
   )
   const [smallBlindStr, setSmallBlindStr] = useState('25')
   const [tableType, setTableType] = useState<'timer' | 'open'>('timer')
+  const [gameMode, setGameMode] = useState<'cash' | 'sit_go'>('cash')
+  const [maxPlayersStr, setMaxPlayersStr] = useState('9')
+  const [buyInStr, setBuyInStr] = useState('10000')
+  const [startingStackStr, setStartingStackStr] = useState('10000')
 
   const smallBlindNum = parseInt(smallBlindStr, 10)
   const bigBlindDisplay =
     !isNaN(smallBlindNum) && smallBlindNum > 0
       ? (smallBlindNum * 2).toLocaleString()
       : '—'
+
+  const maxPlayersNum = parseInt(maxPlayersStr, 10)
+  const buyInNum = parseInt(buyInStr, 10)
+  const houseFeePercent = 10
+  const totalBuyIns =
+    !isNaN(maxPlayersNum) && !isNaN(buyInNum) && buyInNum > 0
+      ? maxPlayersNum * buyInNum
+      : 0
+  const prizePool = Math.round(totalBuyIns * (1 - houseFeePercent / 100))
 
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
@@ -29,6 +42,44 @@ export default function CreateTableForm() {
       </div>
       <form action={action} className="p-5 space-y-5">
         <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5 sm:col-span-2">
+            <p className="block text-sm font-medium text-zinc-300">Game Mode</p>
+            <input type="hidden" name="gameMode" value={gameMode} />
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setGameMode('cash')}
+                className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                  gameMode === 'cash'
+                    ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
+                    : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
+                }`}
+              >
+                <span className="block font-semibold">Cash Game</span>
+                <span className="block text-xs text-zinc-500">
+                  Players buy in and leave whenever they like.
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setGameMode('sit_go')
+                  setTableType('timer')
+                }}
+                className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                  gameMode === 'sit_go'
+                    ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
+                    : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
+                }`}
+              >
+                <span className="block font-semibold">Sit & Go</span>
+                <span className="block text-xs text-zinc-500">
+                  Fixed buy-in tournament with a prize pool.
+                </span>
+              </button>
+            </div>
+          </div>
+
           <div className="space-y-1.5 sm:col-span-2">
             <label htmlFor="name" className="block text-sm font-medium text-zinc-300">
               Table Name
@@ -73,7 +124,8 @@ export default function CreateTableForm() {
             <select
               id="maxPlayers"
               name="maxPlayers"
-              defaultValue="9"
+              value={maxPlayersStr}
+              onChange={(e) => setMaxPlayersStr(e.target.value)}
               className={inputClass}
             >
               {[2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
@@ -84,40 +136,89 @@ export default function CreateTableForm() {
             </select>
           </div>
 
-          <div className="space-y-1.5 sm:col-span-2">
-            <p className="block text-sm font-medium text-zinc-300">Table Type</p>
-            <input type="hidden" name="tableType" value={tableType} />
-            <div className="grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => setTableType('timer')}
-                className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
-                  tableType === 'timer'
-                    ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
-                    : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
-                }`}
-              >
-                <span className="block font-semibold">Timer</span>
-                <span className="block text-xs text-zinc-500">
-                  Players are locked in until the session timer ends or an admin kicks them.
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setTableType('open')}
-                className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
-                  tableType === 'open'
-                    ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
-                    : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
-                }`}
-              >
-                <span className="block font-semibold">Open</span>
-                <span className="block text-xs text-zinc-500">
-                  Players can leave the table whenever they want.
-                </span>
-              </button>
+          {gameMode === 'sit_go' && (
+            <>
+              <div className="space-y-1.5">
+                <label htmlFor="buyIn" className="block text-sm font-medium text-zinc-300">
+                  Buy-in
+                </label>
+                <input
+                  id="buyIn"
+                  name="buyIn"
+                  type="number"
+                  required
+                  min={1}
+                  value={buyInStr}
+                  onChange={(e) => setBuyInStr(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="startingStack" className="block text-sm font-medium text-zinc-300">
+                  Starting Stack
+                </label>
+                <input
+                  id="startingStack"
+                  name="startingStack"
+                  type="number"
+                  required
+                  min={1}
+                  value={startingStackStr}
+                  onChange={(e) => setStartingStackStr(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+
+              <div className="space-y-1.5 sm:col-span-2 rounded-lg border border-amber-800/40 bg-amber-900/10 px-3 py-2.5">
+                <p className="text-sm font-medium text-zinc-300">Prize Pool (auto)</p>
+                <p className="mt-0.5 text-xs text-zinc-500">
+                  {maxPlayersStr} seats × {!isNaN(buyInNum) ? buyInNum.toLocaleString() : '—'} buy-in −{' '}
+                  {houseFeePercent}% house fee
+                </p>
+                <p className="mt-1 text-lg font-bold tabular-nums text-amber-400">
+                  {prizePool.toLocaleString()}
+                </p>
+              </div>
+            </>
+          )}
+
+          <input type="hidden" name="tableType" value={tableType} />
+          {gameMode === 'cash' && (
+            <div className="space-y-1.5 sm:col-span-2">
+              <p className="block text-sm font-medium text-zinc-300">Table Type</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setTableType('timer')}
+                  className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                    tableType === 'timer'
+                      ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
+                      : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
+                  }`}
+                >
+                  <span className="block font-semibold">Timer</span>
+                  <span className="block text-xs text-zinc-500">
+                    Players are locked in until the session timer ends or an admin kicks them.
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTableType('open')}
+                  className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                    tableType === 'open'
+                      ? 'border-emerald-600 bg-emerald-600/10 text-emerald-300'
+                      : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:border-zinc-600'
+                  }`}
+                >
+                  <span className="block font-semibold">Open</span>
+                  <span className="block text-xs text-zinc-500">
+                    Players can leave the table whenever they want.
+                  </span>
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {state?.error && (
