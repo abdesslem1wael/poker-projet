@@ -16,7 +16,7 @@ export default function DeleteTableButton({ tableId, tableName }: Props) {
     <form
       action={action}
       onSubmit={(e) => {
-        if (!window.confirm(`Delete "${tableName}"? This will permanently remove the table and all its tips.`)) {
+        if (!window.confirm(`Delete "${tableName}"? This will permanently remove the table. Collected tips are archived, not deleted.`)) {
           e.preventDefault()
         }
       }}

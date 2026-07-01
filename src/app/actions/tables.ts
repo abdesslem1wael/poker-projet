@@ -177,7 +177,8 @@ export async function deleteTableAction(
 
   const adminClient = createAdminClient()
 
-  await adminClient.from('dealer_tips').delete().eq('table_id', tableId)
+  // dealer_tips is intentionally left alone here — a DB trigger archives it
+  // (table_id -> NULL, name/id preserved) as part of the poker_tables delete.
   await adminClient.from('game_history').delete().eq('table_id', tableId)
   await adminClient.from('table_players').delete().eq('table_id', tableId)
   const { error } = await adminClient.from('poker_tables').delete().eq('id', tableId)
@@ -185,5 +186,31 @@ export async function deleteTableAction(
   if (error) return { error: error.message }
 
   revalidatePath('/admin/tables')
+  revalidatePath('/admin/dashboard')
   redirect('/admin/tables')
+}
+
+// Permanently removes collected tips. This is the ONLY path that hard-deletes
+// dealer_tips rows — deleting a table never does (see deleteTableAction).
+// Accepts either a live table_id or, for tips whose table has already been
+// deleted, the archived deleted_table_id.
+export async function deleteDealerTipsAction(
+  _state: ActionState,
+  formData: FormData
+): Promise<ActionState> {
+  const admin = await requireAdmin()
+  if (!admin) return { error: 'Unauthorized' }
+
+  const groupKey = (formData.get('groupKey') as string | null)?.trim()
+  const archived = formData.get('archived') === 'true'
+  if (!groupKey) return { error: 'Missing tip group' }
+
+  const adminClient = createAdminClient()
+  const column = archived ? 'deleted_table_id' : 'table_id'
+  const { error } = await adminClient.from('dealer_tips').delete().eq(column, groupKey)
+
+  if (error) return { error: error.message }
+
+  revalidatePath('/admin/dashboard')
+  return undefined
 }

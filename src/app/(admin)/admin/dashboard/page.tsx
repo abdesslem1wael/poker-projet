@@ -3,6 +3,7 @@ import { logoutAction } from '@/app/actions/auth'
 import { createAdminClient } from '@/lib/supabase/admin'
 import SessionPanel from './SessionPanel'
 import WatchTablesPanel from './WatchTablesPanel'
+import DeleteTipsButton from './DeleteTipsButton'
 import type { LiveTable } from './WatchTablesPanel'
 
 type TableRow = {
@@ -19,14 +20,18 @@ type GameHistoryRow = {
 }
 
 type DealerTipRow = {
-  table_id: string
+  table_id: string | null
   amount: number
+  archived: boolean
+  deleted_table_id: string | null
+  deleted_table_name: string | null
 }
 
 type TipSummary = {
-  tableId: string
+  groupKey: string
   tableName: string
-  tableStatus: TableRow['status']
+  tableStatus: TableRow['status'] | null
+  isDeleted: boolean
   autoTips: number
   dealerTips: number
   total: number
@@ -41,7 +46,9 @@ async function fetchDashboardData() {
       .select('id, name, small_blind, big_blind, status')
       .order('created_at', { ascending: false }),
     adminClient.from('game_history').select('table_id, result_json'),
-    adminClient.from('dealer_tips').select('table_id, amount'),
+    adminClient
+      .from('dealer_tips')
+      .select('table_id, amount, archived, deleted_table_id, deleted_table_name'),
   ])
 
   const tables = (tablesRes.data as TableRow[] | null) ?? []
@@ -62,23 +69,47 @@ async function fetchDashboardData() {
     if (tip > 0) autoTipsMap.set(row.table_id, (autoTipsMap.get(row.table_id) ?? 0) + tip)
   }
 
+  // Tips are grouped by table_id while the table still exists; once a table
+  // is deleted its dealer_tips rows are archived (table_id -> NULL,
+  // deleted_table_id/name captured), so they're grouped by that instead.
   const dealerTipsMap = new Map<string, number>()
+  const archivedNames = new Map<string, string>()
   for (const row of (dealerTipsRes.data as DealerTipRow[] | null) ?? []) {
-    dealerTipsMap.set(row.table_id, (dealerTipsMap.get(row.table_id) ?? 0) + row.amount)
+    const key = row.table_id ?? row.deleted_table_id
+    if (!key) continue
+    dealerTipsMap.set(key, (dealerTipsMap.get(key) ?? 0) + row.amount)
+    if (row.archived && row.deleted_table_name) archivedNames.set(key, row.deleted_table_name)
   }
 
   const tipSummaries: TipSummary[] = tables.map((t) => {
     const autoTips = autoTipsMap.get(t.id) ?? 0
     const dealerTips = dealerTipsMap.get(t.id) ?? 0
     return {
-      tableId: t.id,
+      groupKey: t.id,
       tableName: t.name,
       tableStatus: t.status,
+      isDeleted: false,
       autoTips,
       dealerTips,
       total: autoTips + dealerTips,
     }
   })
+
+  // Archived groups belong to tables that no longer exist in poker_tables.
+  const liveKeys = new Set(tables.map((t) => t.id))
+  for (const [key, name] of archivedNames) {
+    if (liveKeys.has(key)) continue
+    const dealerTips = dealerTipsMap.get(key) ?? 0
+    tipSummaries.push({
+      groupKey: key,
+      tableName: name,
+      tableStatus: null,
+      isDeleted: true,
+      autoTips: 0,
+      dealerTips,
+      total: dealerTips,
+    })
+  }
 
   return { liveTables, tipSummaries }
 }
@@ -184,22 +215,33 @@ export default async function AdminDashboardPage() {
             <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {tipSummaries.map((t) => (
                 <div
-                  key={t.tableId}
+                  key={t.groupKey}
                   className="rounded-xl p-5"
                   style={{
                     background: '#0b111e',
                     border: t.total > 0 ? '1px solid #1e3a28' : '1px solid #1e293b',
                   }}
                 >
-                  <div className="mb-4 flex items-center gap-2">
-                    <span
-                      style={{
-                        width: 8, height: 8, borderRadius: '50%',
-                        background: statusDot[t.tableStatus],
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span className="truncate font-semibold text-zinc-100">{t.tableName}</span>
+                  <div className="mb-4 flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span
+                        style={{
+                          width: 8, height: 8, borderRadius: '50%',
+                          background: t.isDeleted ? '#71717a' : statusDot[t.tableStatus!],
+                          flexShrink: 0,
+                        }}
+                      />
+                      <span className="truncate font-semibold text-zinc-100">{t.tableName}</span>
+                    </div>
+                    {t.isDeleted ? (
+                      <span className="inline-flex shrink-0 items-center rounded-full bg-red-900/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-400 border border-red-900/50">
+                        Table deleted
+                      </span>
+                    ) : (
+                      <span className="inline-flex shrink-0 items-center rounded-full bg-zinc-800/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-400 border border-zinc-700/50">
+                        {t.tableStatus === 'closed' ? 'Closed table' : 'Active table'}
+                      </span>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm">
@@ -228,6 +270,15 @@ export default async function AdminDashboardPage() {
                         {t.total > 0 ? t.total.toLocaleString() : '0'}
                       </span>
                     </div>
+                    {t.dealerTips > 0 && (
+                      <div className="flex justify-end pt-1">
+                        <DeleteTipsButton
+                          groupKey={t.groupKey}
+                          archived={t.isDeleted}
+                          tableName={t.tableName}
+                        />
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
