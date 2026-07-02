@@ -483,6 +483,7 @@ nextApp.prepare().then(() => {
     }
 
     let tournamentFinished = false
+    let brokePlayers: typeof showdown.players = []
 
     if (isSitGo) {
       // Sit & Go: broke players are marked 'eliminated' in sit_go_registrations
@@ -515,11 +516,12 @@ nextApp.prepare().then(() => {
         }
       }
     } else {
-      // Cash games: kick broke players off the table immediately using the
-      // showdown result — never rely on the wallet re-read in doStartHand,
-      // which would miss a failed wallet write. Kicked players must be
-      // re-added chips by an admin before they can rejoin via Join Table.
-      const brokePlayers = showdown.players.filter(p => p.finalStack === 0)
+      // Cash games: mark broke players' seats 'left' immediately (never rely on
+      // the wallet re-read in doStartHand, which would miss a failed wallet
+      // write) so they can't be dealt into the next hand — but keep their
+      // sockets in the room until AFTER showdown_result is broadcast below,
+      // otherwise they'd be kicked out before ever seeing the final board/cards.
+      brokePlayers = showdown.players.filter(p => p.finalStack === 0)
       if (brokePlayers.length > 0) {
         await Promise.all(brokePlayers.map(p =>
           supabase
@@ -530,16 +532,6 @@ nextApp.prepare().then(() => {
             .neq('status', 'left')
         ))
         console.log(`[game] kicked broke players: ${brokePlayers.map(p => p.username).join(', ')}  table=${tableId}`)
-
-        // Notify each broke player's sockets so their UI redirects away.
-        const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
-        for (const s of roomSockets) {
-          if (brokePlayers.some(p => p.playerId === s.data.userId)) {
-            s.emit('kicked_from_table', { tableId, reason: 'out_of_chips' })
-            s.data.seatedAtTables.delete(tableId)
-            s.leave(`table:${tableId}`)
-          }
-        }
         for (const p of brokePlayers) {
           disconnectedSeats.get(tableId)?.delete(p.playerId)
         }
@@ -550,6 +542,20 @@ nextApp.prepare().then(() => {
     if (state) io.to(`table:${tableId}`).emit('table_state', state)
 
     io.to(`table:${tableId}`).emit('showdown_result', showdown)
+
+    // Only now remove broke players' sockets from the room — they've already
+    // received table_state and showdown_result above, so their client can
+    // still render the final board and everyone's revealed cards.
+    if (brokePlayers.length > 0) {
+      const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
+      for (const s of roomSockets) {
+        if (brokePlayers.some(p => p.playerId === s.data.userId)) {
+          s.emit('kicked_from_table', { tableId, reason: 'out_of_chips' })
+          s.data.seatedAtTables.delete(tableId)
+          s.leave(`table:${tableId}`)
+        }
+      }
+    }
 
     if (!tournamentFinished) {
       scheduleAutoStart(tableId)

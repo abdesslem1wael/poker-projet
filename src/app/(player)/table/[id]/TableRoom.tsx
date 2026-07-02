@@ -524,6 +524,7 @@ const ACTION_CHIP_FLIGHT_MS  = 380   // seat → in-front-of-seat: blinds/bet/ca
 const COLLECT_CHIP_FLIGHT_MS = 520   // in-front-of-seat → pot, when the betting round ends (spec: 350–600ms)
 const WINNER_CHIP_FLIGHT_MS  = 850   // pot → winner seat(s) (spec: 700–1000ms)
 const WINNER_FLIGHT_DELAY_MS = 3500  // dwell on showdown cards before the pot flies to the winner
+const OUT_OF_CHIPS_OVERLAY_DELAY_MS = 7000  // let the busted player watch the showdown before covering the table
 
 type ChipFlightData = {
   id: string
@@ -1043,6 +1044,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const heroCardTimersRef  = useRef<ReturnType<typeof setTimeout>[]>([])
   const seatAnimTimersRef  = useRef<ReturnType<typeof setTimeout>[]>([])
   const communityTimersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const kickedOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const currentHandRef     = useRef<PublicHandState | null>(initialState.handState)
   const visibleCommunityCountRef = useRef(initialState.handState?.communityCards.length ?? 0)
   const prevHandNumberRef  = useRef<number | null>(initialState.handState?.handNumber ?? null)
@@ -1574,8 +1576,19 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         const msg = p.reason === 'out_of_chips'
           ? 'Hard luck! You ran out of chips.'
           : 'You were removed by an admin.'
-        setKickedMsg({ msg, reason: p.reason })
-        setTimeout(() => { if (active) router.push(isAdmin ? '/admin/dashboard' : '/lobby') }, 2500)
+        const showOverlayAndRedirect = () => {
+          if (!active) return
+          setKickedMsg({ msg, reason: p.reason })
+          setTimeout(() => { if (active) router.push(isAdmin ? '/admin/dashboard' : '/lobby') }, 2500)
+        }
+        if (p.reason === 'out_of_chips') {
+          // The showdown_result for this hand arrives just before this event —
+          // hold off covering the screen so the busted player can actually see
+          // the final board and everyone's revealed cards, same as other players do.
+          kickedOverlayTimerRef.current = setTimeout(showOverlayAndRedirect, OUT_OF_CHIPS_OVERLAY_DELAY_MS)
+        } else {
+          showOverlayAndRedirect()
+        }
       }
 
       const onChatMessage = (p: ChatMessage) => {
@@ -1619,6 +1632,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('kicked_from_table', onKickedFromTable)
         socket.off('table_chat_message', onChatMessage)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
+        if (kickedOverlayTimerRef.current) { clearTimeout(kickedOverlayTimerRef.current); kickedOverlayTimerRef.current = null }
         heroCardTimersRef.current.forEach(clearTimeout); heroCardTimersRef.current = []
         seatAnimTimersRef.current.forEach(clearTimeout); seatAnimTimersRef.current = []
         communityTimersRef.current.forEach(clearTimeout); communityTimersRef.current = []
@@ -2634,7 +2648,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                               {stackDisplay}
                             </div>
                             {pillAction && (
-                              <div className="tbl-seat-pill-action" style={{ fontSize: 8, letterSpacing: '0.8px', textTransform: 'uppercase', marginTop: 1, color: pillColor, fontWeight: 600 }}>
+                              <div className="tbl-seat-pill-action" style={{ fontSize: 7, letterSpacing: '0.8px', textTransform: 'uppercase', marginTop: 1, color: pillColor, fontWeight: 600 }}>
                                 {pillAction}
                               </div>
                             )}
@@ -2851,7 +2865,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           }}
         >
           <div
-            className="tbl-seat-pill-name"
+            className="tbl-hero-pill-name"
             style={{
               fontSize: 8,
               letterSpacing: '0.9px',
@@ -2868,7 +2882,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           </div>
 
           <div
-            className="tbl-seat-pill-stack"
+            className="tbl-hero-pill-stack"
             style={{
               fontFamily: '"JetBrains Mono",monospace',
               fontSize: 11,
@@ -2883,7 +2897,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
           {pillAction && (
             <div
-              className="tbl-seat-pill-action"
+              className="tbl-hero-pill-action"
               style={{
                 fontSize: 7,
                 letterSpacing: '0.7px',
@@ -3060,9 +3074,16 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-player-circle{width:30px!important;height:30px!important;font-size:13px!important;}
             .tbl-player-circle-hero{width:36px!important;height:36px!important;font-size:17px!important;}
             .tbl-seat-pill{padding:1px 6px!important;min-width:48px!important;border-radius:5px!important;}
-            .tbl-seat-pill-name{font-size:6px!important;letter-spacing:0.4px!important;}
-            .tbl-seat-pill-stack{font-size:9px!important;}
-            .tbl-seat-pill-action{font-size:5.5px!important;margin-top:0!important;}
+            /* Pre-scale sizes — this pod is wrapped in transform:scale(--mscale) below
+               (as low as 0.54 at 9-max), so these render ~6.5-8px on screen, not their
+               literal value. Tuned against the worst-case (9-max) tier; less-crowded
+               tiers (--mscale 0.62/0.70) come out a bit larger, which is fine. Kept
+               modest — pushing the floor higher collides with neighboring seat pods
+               at 9-max, since the pill's growth isn't accounted for in the fixed
+               MOBILE_SEAT_PRESETS spacing. */
+            .tbl-seat-pill-name{font-size:10px!important;letter-spacing:0.3px!important;}
+            .tbl-seat-pill-stack{font-size:13px!important;}
+            .tbl-seat-pill-action{font-size:9px!important;margin-top:0!important;}
 
             /* Empty seats — very subtle to reduce visual noise */
             .tbl-empty-seat{opacity:0.25!important;width:36px!important;height:36px!important;font-size:8px!important;}
@@ -3208,8 +3229,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-player-circle{width:26px!important;height:26px!important;font-size:11px!important;}
             .tbl-player-circle-hero{width:30px!important;height:30px!important;font-size:14px!important;}
             .tbl-seat-pill{padding:1px 4px!important;min-width:38px!important;}
-            .tbl-seat-pill-name{font-size:5px!important;}
-            .tbl-seat-pill-stack{font-size:8px!important;}
+            /* Pre-scale sizes — see the mscale comment in the (max-height:500px) block
+               above. Worst-case tier here is --mscale:0.3 (7-9 max), which puts these
+               at ~5.5-7px on screen. */
+            .tbl-seat-pill-name{font-size:15px!important;}
+            .tbl-seat-pill-stack{font-size:19px!important;}
             .tbl-community-row{transform:scale(0.66);transform-origin:center;}
             .ap-btn{padding:5px 6px 4px!important;font-size:10px!important;}
             .ap-qb{padding:3px 6px!important;font-size:9px!important;}
