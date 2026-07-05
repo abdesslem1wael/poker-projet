@@ -1138,6 +1138,33 @@ nextApp.prepare().then(() => {
       })
     })
 
+    // ── send_reaction ─────────────────────────────────────────────────────
+    // Targeted live reaction (Trash / Tissue) — purely visual, never persisted.
+    socket.on('send_reaction', ({ tableId, toPlayerId, reactionType }) => {
+      console.debug('[reaction] server received send_reaction', { tableId, fromPlayerId: userId, toPlayerId, reactionType })
+
+      if (!socket.data.joinedTables.has(tableId)) {
+        console.debug('[reaction] rejected — sender has not joined this table', { tableId, userId })
+        return
+      }
+      if (reactionType !== 'trash' && reactionType !== 'tissue') {
+        console.debug('[reaction] rejected — invalid reactionType', { reactionType })
+        return
+      }
+      if (typeof toPlayerId !== 'string' || toPlayerId === userId) {
+        console.debug('[reaction] rejected — invalid toPlayerId', { toPlayerId })
+        return
+      }
+
+      console.debug('[reaction] broadcasting reaction_sent', { tableId, fromPlayerId: userId, toPlayerId, reactionType })
+      io.to(`table:${tableId}`).emit('reaction_sent', {
+        tableId,
+        fromPlayerId: userId,
+        toPlayerId,
+        reactionType,
+      })
+    })
+
     // ── send_tip ───────────────────────────────────────────────────────────
     socket.on('send_tip', async ({ tableId, handNumber, amount }) => {
       if (amount <= 0) return

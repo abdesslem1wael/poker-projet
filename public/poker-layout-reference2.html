@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Poker Table Layout — Mobile Prototype</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+  /* ═══════════════════════════════════════════════════════════════════════
+     MOBILE-FIRST: this app is only ever used on a phone, in landscape
+     (same assumption the real product makes — see the portrait-lock below).
+     Every size below is tuned to fit a 9-max table on a short landscape
+     viewport (~360-430px tall) first. Larger screens (tablet/desktop, for
+     reviewing the mockup on a laptop) get modest upsizing via min-width
+     media queries at the bottom — they are the enhancement, not the base.
+     ═══════════════════════════════════════════════════════════════════════ */
+
+  :root{
+    --bg:            #05070d;
+    --felt-1:        #1d6638;
+    --felt-2:        #0e4a26;
+    --felt-3:        #062f16;
+    --wood-1:        #5c3317;
+    --wood-2:        #2c1608;
+    --wood-3:        #180902;
+    --gold:          #c9a84c;
+    --gold-bright:   #e8c97a;
+    --panel-bg:      rgba(9, 13, 22, 0.85);
+    --panel-border:  rgba(255,255,255,0.08);
+    --panel-border-active: rgba(201,168,76,0.55);
+    --text-dim:      #5b6472;
+    --text-mid:      #94a3b8;
+    --blue:          #4da3ff;
+    --green:         #34d399;
+    --red:           #f87171;
+    --purple:        #c4b5fd;
+  }
+
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+
+  html,body{
+    margin:0; padding:0; height:100%;
+    background:var(--bg);
+    font-family:'Inter',sans-serif;
+    color:#e2e8f0;
+    overflow:hidden;
+    overscroll-behavior:none;
+  }
+
+  .app{
+    display:flex; flex-direction:column;
+    height:100vh; height:100dvh; width:100vw;
+    background:radial-gradient(ellipse at 50% -10%, rgba(60,90,60,0.14), transparent 60%), var(--bg);
+    padding-top:env(safe-area-inset-top);
+    padding-left:env(safe-area-inset-left);
+    padding-right:env(safe-area-inset-right);
+  }
+
+  /* ── Portrait lock — this game is landscape-only on a phone ─────────────
+     Shown whenever the viewport is both narrow AND taller than it is wide.
+     Mirrors the real app's behaviour so the prototype is honest about the
+     one hard requirement of a 9-seat table on a phone: rotate the device. */
+  .portrait-lock{
+    display:none;
+    position:fixed; inset:0; z-index:999;
+    background:var(--bg);
+    flex-direction:column; align-items:center; justify-content:center;
+    gap:22px; text-align:center; padding:32px;
+  }
+  .portrait-lock .icon{ font-size:52px; animation:rock 1.4s ease-in-out infinite; }
+  .portrait-lock h2{ margin:0; color:#f1f5f9; font-size:17px; font-weight:700; letter-spacing:-0.2px; }
+  .portrait-lock p{ margin:0; color:var(--text-dim); font-size:13px; line-height:1.5; max-width:260px; }
+  @keyframes rock{ 0%,100%{ transform:rotate(-8deg); } 50%{ transform:rotate(8deg); } }
+  @media (max-aspect-ratio: 1/1){
+    .portrait-lock{ display:flex; }
+    .app{ display:none; }
+  }
+
+  /* ══════════════════════════════ HEADER ═══════════════════════════════ */
+  .header{
+    height:28px; flex-shrink:0;
+    background:#0a0f1a;
+    border-bottom:1px solid #1a2540;
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0 8px;
+    gap:8px;
+  }
+  .header-left{ display:flex; align-items:center; gap:7px; min-width:0; overflow:hidden; }
+  .table-name{
+    font-family:'Cinzel',serif; font-weight:700;
+    font-size:11px; letter-spacing:0.2px; color:#f1f5f9;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .phase-badge{
+    background:#1e3a8a; color:#fff; flex-shrink:0;
+    font-size:8.5px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase;
+    padding:2px 7px; border-radius:4px;
+  }
+  .last-hand-btn{ display:none; }
+
+  .header-right{ display:flex; align-items:center; gap:6px; flex-shrink:0; }
+  .blinds-label{ display:none; }
+  .icon-btn{
+    display:flex; align-items:center; justify-content:center;
+    width:24px; height:22px;
+    background:transparent; border:1px solid rgba(255,255,255,0.1);
+    border-radius:5px; color:var(--text-mid); font-size:11px; cursor:pointer;
+  }
+  .leave-btn{
+    background:#1a0a0a; border:1px solid #3f1010;
+    color:var(--red); font-size:9.5px; font-weight:700;
+    padding:4px 9px; border-radius:5px; cursor:pointer;
+  }
+  .status-dot{ width:6px; height:6px; border-radius:50%; background:#34d399; box-shadow:0 0 5px #34d399; flex-shrink:0; }
+
+  /* ══════════════════════════════ TABLE AREA ════════════════════════════ */
+  .table-wrap{
+    flex:1; min-height:0; position:relative;
+    display:flex; align-items:center; justify-content:center;
+    padding:4px 8px 2px;
+    overflow:hidden;
+  }
+
+  .table-surface{
+    position:relative;
+    width:100%; max-width:900px;
+    aspect-ratio:1.9;
+    max-height:100%;
+  }
+
+  .table-glow{
+    position:absolute; inset:-6%;
+    background:radial-gradient(ellipse, rgba(16,100,50,0.55) 0%, transparent 68%);
+    filter:blur(24px); border-radius:50%; pointer-events:none;
+  }
+  .table-rail{
+    position:absolute; top:5%; left:1.5%; right:1.5%; bottom:5%;
+    border-radius:50%;
+    background:linear-gradient(160deg, var(--wood-1) 0%, var(--wood-2) 40%, var(--wood-3) 100%);
+    box-shadow:0 0 0 2px #7a4a20, 0 0 0 4px #1a0a02, 0 18px 40px rgba(0,0,0,0.9);
+  }
+  .table-felt{
+    position:absolute; top:9%; left:3.5%; right:3.5%; bottom:9%;
+    border-radius:50%;
+    background:radial-gradient(ellipse at 50% 38%, var(--felt-1) 0%, var(--felt-2) 50%, var(--felt-3) 100%);
+    box-shadow:inset 0 0 60px rgba(0,0,0,0.6), inset 0 0 24px rgba(0,0,0,0.3);
+    overflow:hidden;
+  }
+  .table-felt::before{ content:''; position:absolute; inset:4%; border-radius:50%; border:1px solid rgba(201,168,76,0.12); }
+  .table-felt::after{
+    content:'♠'; position:absolute; top:50%; left:50%; transform:translate(-50%,-54%);
+    font-size:14vw; color:rgba(0,0,0,0.07); line-height:1;
+  }
+
+  /* ── centre: pot + community cards ────────────────────────────────────── */
+  .table-center{
+    position:absolute; top:0; left:0; right:0; bottom:5%;
+    display:flex; align-items:center; justify-content:center; pointer-events:none;
+  }
+  .center-stack{ display:flex; flex-direction:column; align-items:center; gap:4px; }
+
+  .pot-pill{
+    display:flex; align-items:center; gap:5px;
+    background:rgba(0,0,0,0.72); border:1px solid rgba(201,168,76,0.32);
+    border-radius:10px; padding:2px 9px;
+  }
+  .pot-pill .label{ font-size:7px; font-weight:700; letter-spacing:0.1em; color:rgba(245,236,215,0.5); text-transform:uppercase; }
+  .pot-pill .amount{ font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:700; color:var(--gold-bright); }
+
+  .community-row{ display:flex; gap:3px; }
+
+  /* ── playing card ──────────────────────────────────────────────────────── */
+  .card{
+    position:relative; flex-shrink:0;
+    width:30px; height:42px; border-radius:4px;
+    background:#fff; border:1px solid #d1d5db;
+    box-shadow:0 2px 5px rgba(0,0,0,0.4);
+  }
+  .card .corner{ position:absolute; top:2px; left:2.5px; display:flex; flex-direction:column; align-items:center; line-height:1; font-family:Georgia,serif; font-weight:700; }
+  .card .corner .rank{ font-size:7.5px; letter-spacing:-0.4px; }
+  .card .corner .suit{ font-size:6px; margin-top:-1px; }
+  .card .center-suit{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:15px; font-family:Georgia,serif; }
+  .card.spades   .corner, .card.spades   .center-suit{ color:#0f172a; }
+  .card.clubs    .corner, .card.clubs    .center-suit{ color:#15803d; }
+  .card.hearts   .corner, .card.hearts   .center-suit{ color:#dc2626; }
+  .card.diamonds .corner, .card.diamonds .center-suit{ color:#2563eb; }
+
+  .card.hero-card{ width:34px; height:48px; border-radius:5px; box-shadow:0 0 0 1.5px rgba(201,168,76,0.6), 0 3px 10px rgba(0,0,0,0.6); }
+  .card.hero-card .corner .rank{ font-size:8.5px; }
+  .card.hero-card .center-suit{ font-size:17px; }
+
+  .card-back{
+    width:19px; height:27px; border-radius:3px; flex-shrink:0;
+    background:#1a2a4a; border:1px solid rgba(201,168,76,0.22);
+    box-shadow:0 2px 5px rgba(0,0,0,0.5); position:relative; overflow:hidden;
+  }
+  .card-back::before{ content:'♠'; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:9.5px; color:rgba(201,168,76,0.38); }
+  .card-back::after{ content:''; position:absolute; inset:2px; border-radius:2px; border:1px solid rgba(201,168,76,0.14); }
+
+  .empty-slot{ width:30px; height:42px; border-radius:4px; border:1.5px dashed rgba(255,255,255,0.2); background:rgba(255,255,255,0.03); }
+
+  /* ══════════════════════════ SEAT PODS (vector-based layout) ═════════════
+     Each seat anchors at a fixed radial point; the pod's flex-direction is
+     chosen so the INFO PANEL always faces away from centre and the BET
+     CHIPS (a separate element, on a smaller inner radius, same line) never
+     share that space.
+        top seats    -> column          (panel top, cards below)
+        bottom seats -> column-reverse  (cards top, panel below)
+        left seats   -> row             (panel left, cards right)
+        right seats  -> row-reverse     (cards left, panel right)
+  ════════════════════════════════════════════════════════════════════════ */
+
+  .seat{ position:absolute; transform:translate(-50%,-50%); z-index:10; }
+  .seat.hero{ z-index:30; }
+
+  .seat-pod{ display:flex; align-items:center; gap:2px; }
+  .seat-pod.dir-top{     flex-direction:column; }
+  .seat-pod.dir-bottom{  flex-direction:column-reverse; }
+  .seat-pod.dir-left{    flex-direction:row; }
+  .seat-pod.dir-right{   flex-direction:row-reverse; }
+
+  /* ── Uniform opponent layout ──────────────────────────────────────────
+     Every non-hero seat now uses the SAME vertical stack, regardless of
+     where it sits on the oval: avatar, then hole cards directly below it,
+     then the info panel directly below the cards. Bet chips stay a
+     separate element (see .bet-chips / chip-N below), positioned further
+     toward the table centre — so they can never collide with this stack. */
+  .seat-pod.dir-stack{ flex-direction:column; align-items:center; }
+
+  .avatar{
+    position:relative; flex-shrink:0;
+    width:18px; height:18px; border-radius:50%;
+    background:radial-gradient(circle at 38% 35%, #1e2a3a, #0f1824);
+    border:1.5px solid rgba(255,255,255,0.14);
+    display:flex; align-items:center; justify-content:center;
+    font-size:7.5px; font-weight:700; color:var(--text-mid);
+  }
+  .seat.hero .avatar{
+    width:30px; height:30px; font-size:12px;
+    background:radial-gradient(circle at 38% 35%, #1e3a5f, #0f2040);
+    border-color:rgba(201,168,76,0.45); color:var(--gold-bright); border-width:2px;
+  }
+  .seat.turn .avatar{ border-color:var(--gold); box-shadow:0 0 0 2px rgba(201,168,76,0.2), 0 0 9px rgba(201,168,76,0.45); }
+
+  .badge{
+    position:absolute; width:9px; height:9px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-size:4.5px; font-weight:900; box-shadow:0 1px 2px rgba(0,0,0,0.5);
+  }
+  .badge.dealer{ bottom:-2px; right:-2px; background:radial-gradient(circle at 35% 35%, #fef9c3, #ca8a04); border:1px solid #92400e; color:#1a0a00; }
+  .badge.sb{ top:-2px; right:-2px; background:#1d4ed8; color:#fff; border:1px solid #1e3a8a; }
+  .badge.bb{ top:-2px; right:-2px; background:#6d28d9; color:#fff; border:1px solid #4c1d95; }
+
+  .hole-cards{ display:flex; gap:2px; flex-shrink:0; }
+
+  /* ── info panel ───────────────────────────────────────────────────────── */
+  .info-panel{
+    background:var(--panel-bg); border:1px solid var(--panel-border);
+    border-radius:5px; padding:1.5px 5px; min-width:44px; text-align:center;
+    flex-shrink:0;
+  }
+  .seat.turn .info-panel{ border-color:var(--panel-border-active); box-shadow:0 0 7px rgba(201,168,76,0.18); }
+  .seat.folded .info-panel, .seat.folded .avatar, .seat.folded .hole-cards{ opacity:0.4; }
+
+  .info-name{
+    font-size:6.3px; font-weight:600; letter-spacing:0.04em; text-transform:uppercase;
+    color:rgba(245,236,215,0.55); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .seat.hero .info-name{ color:var(--gold); font-size:8px; }
+  .info-stack{
+    display:flex; align-items:center; justify-content:center; gap:2.5px;
+    font-family:'JetBrains Mono',monospace; font-size:8.5px; font-weight:700;
+    color:var(--gold-bright); margin-top:1px;
+  }
+  .seat.hero .info-stack{ font-size:11px; }
+  .chip-dot{ width:6px; height:6px; border-radius:50%; flex-shrink:0; box-shadow:0 1px 2px rgba(0,0,0,0.5); }
+  .chip-dot.white{ background:radial-gradient(circle at 35% 30%,#fff,#cbd5e1); }
+  .chip-dot.blue{  background:radial-gradient(circle at 35% 30%,#60a5fa,#1e3a8a); }
+  .chip-dot.green{ background:radial-gradient(circle at 35% 30%,#4ade80,#14532d); }
+  .chip-dot.black{ background:radial-gradient(circle at 35% 30%,#475569,#020617); }
+  .chip-dot.purple{background:radial-gradient(circle at 35% 30%,#a78bfa,#4c1d95); }
+
+  .info-status{ font-size:5.3px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; margin-top:1px; }
+  .seat.hero .info-status{ font-size:7.5px; }
+  .st-turn{ color:#86efac; } .st-raised{ color:var(--blue); } .st-called{ color:var(--blue); }
+  .st-folded{ color:var(--red); } .st-allin{ color:var(--purple); }
+
+  /* ── bet chips — separate element, closer to table centre ──────────────── */
+  .bet-chips{ position:absolute; transform:translate(-50%,-50%); display:flex; flex-direction:column; align-items:center; gap:1px; z-index:9; }
+  .chip-stack{ position:relative; width:12px; height:16px; }
+  .chip-stack .chip{ position:absolute; left:0; width:12px; height:12px; border-radius:50%; box-shadow:0 1px 2px rgba(0,0,0,0.55); }
+  .chip-stack .chip::after{ content:''; position:absolute; inset:2px; border-radius:50%; border:1px solid rgba(255,255,255,0.3); }
+  .chip-amt{ background:rgba(0,0,0,0.8); color:var(--gold-bright); font-size:6.5px; font-weight:700; padding:1px 3px; border-radius:2px; white-space:nowrap; }
+  .mini-blind{ font-size:5.5px; font-weight:800; color:#fff; padding:0.5px 3px; border-radius:2px; }
+  .mini-blind.sb{ background:#1d4ed8; } .mini-blind.bb{ background:#6d28d9; }
+
+  /* seat anchor coordinates (percent of .table-surface), same radial math
+     used for getSeatVisualLayout: cards on one ring, bet chips on a
+     smaller inner ring, along the same seat→centre line. */
+  .seat-1 { left:50.00%; top:95.00%; }
+  .seat-2 { left:21.06%; top:83.00%; }
+  .seat-3 { left:5.68%;  top:62.00%; }
+  .seat-4 { left:10.97%; top:21.00%; }
+  .seat-5 { left:34.61%; top:11.00%; }
+  .seat-6 { left:65.39%; top:11.00%; }
+  .seat-7 { left:89.03%; top:21.00%; }
+  .seat-8 { left:94.32%; top:62.00%; }
+  .seat-9 { left:78.94%; top:83.00%; }
+
+  .chip-2 { left:30.71%; top:71.40%; }
+  .chip-3 { left:20.44%; top:54.90%; }
+  .chip-4 { left:23.99%; top:36.00%; }
+  /* Seats 5 & 6 sit closest to the top rail, so their vertical pod
+     (avatar -> cards -> panel) has the least natural room before its
+     panel reaches toward centre. Pulled further inward than the other
+     chip anchors so they clear the panel with real margin. */
+  .chip-5 { left:42.50%; top:35.00%; }
+  .chip-6 { left:57.50%; top:35.00%; }
+  .chip-7 { left:76.01%; top:36.00%; }
+  .chip-8 { left:79.56%; top:54.90%; }
+  .chip-9 { left:69.29%; top:71.40%; }
+
+  .hero-bet{ margin-bottom:2px; }
+
+  /* ══════════════════════════════ ACTION PANEL ═════════════════════════
+     Two-column layout tuned for a phone in landscape: quick bets + raise
+     slider on the left (thumb-reachable), the four action buttons on the
+     right where a thumb naturally rests holding the phone sideways. */
+  .action-panel{
+    flex-shrink:0;
+    background:rgba(7,9,14,0.6);
+    backdrop-filter:blur(20px) saturate(1.5);
+    border-top:1px solid rgba(255,255,255,0.08);
+    padding:3px 8px calc(3px + env(safe-area-inset-bottom));
+  }
+  .action-inner{ display:flex; align-items:stretch; gap:8px; }
+
+  .raise-panel{ display:flex; flex-direction:column; gap:3px; flex:1; min-width:0; justify-content:center; }
+  .quick-bets{ display:flex; gap:3px; flex-wrap:wrap; }
+  .qb{
+    font-size:8px; font-weight:700; padding:3px 7px;
+    background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12);
+    border-radius:5px; color:rgba(245,236,215,0.6); cursor:pointer;
+  }
+  .raise-row{ display:flex; align-items:center; gap:6px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.07); border-radius:7px; padding:3px 8px; }
+  .raise-to{ display:flex; flex-direction:column; align-items:flex-end; flex-shrink:0; }
+  .raise-to .lbl{ font-size:6.5px; letter-spacing:0.1em; text-transform:uppercase; color:rgba(245,236,215,0.4); }
+  .raise-to .val{ font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; color:var(--gold-bright); }
+  .raise-slider{ flex:1; -webkit-appearance:none; appearance:none; height:14px; background:transparent; outline:none; cursor:pointer; }
+  .raise-slider::-webkit-slider-runnable-track{ height:4px; border-radius:2px; background:linear-gradient(to right, var(--gold) 32%, rgba(255,255,255,0.12) 32%); }
+  .raise-slider::-webkit-slider-thumb{ -webkit-appearance:none; margin-top:-8px; width:20px; height:20px; border-radius:50%; background:var(--gold); border:2px solid #fff; box-shadow:0 0 6px rgba(201,168,76,0.55); cursor:pointer; }
+
+  .action-buttons{ display:flex; gap:5px; flex-shrink:0; }
+  .abtn{
+    padding:6px 8px 5px; border:none; border-radius:8px;
+    font-size:10px; font-weight:700; letter-spacing:0.3px; text-transform:uppercase;
+    display:flex; flex-direction:column; align-items:center; gap:1px;
+    cursor:pointer; min-width:56px; min-height:34px; justify-content:center;
+  }
+  .abtn .sub{ font-size:8px; font-weight:400; opacity:0.75; text-transform:none; }
+  .abtn.fold{ background:linear-gradient(180deg,#4a1515,#2d0c0c); border:1px solid rgba(220,38,38,0.35); color:#fca5a5; }
+  .abtn.call{ background:linear-gradient(180deg,#0e3320,#081d13); border:1px solid rgba(52,211,153,0.32); color:#34d399; }
+  .abtn.raise{ background:linear-gradient(180deg,#3a2508,#241600); border:1px solid rgba(201,168,76,0.42); color:var(--gold-bright); }
+  .abtn.allin{ background:linear-gradient(180deg,#2e0f50,#1c0935); border:1px solid rgba(168,85,247,0.4); color:var(--purple); }
+  .abtn:active{ filter:brightness(1.2); }
+
+  /* ══════════════════ ENHANCEMENT for wider screens (tablet / desktop) ══════════════════
+     The phone-landscape sizing above is the baseline. On a roomier screen
+     we simply have more breathing room to work with — nothing about the
+     layout LOGIC changes, only scale. */
+  @media (min-width: 700px) and (min-height: 420px){
+    .header{ height:44px; padding:0 16px; }
+    .table-name{ font-size:14px; }
+    .phase-badge{ font-size:10px; padding:3px 9px; }
+    .last-hand-btn{ display:inline-block; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); color:var(--text-mid); font-size:11px; font-weight:600; padding:4px 11px; border-radius:6px; cursor:pointer; }
+    .blinds-label{ display:inline; color:var(--text-dim); font-size:12px; font-family:'JetBrains Mono',monospace; }
+    .icon-btn{ width:28px; height:26px; font-size:13px; }
+    .leave-btn{ font-size:11px; padding:5px 13px; }
+
+    .card{ width:48px; height:67px; border-radius:6px; }
+    .card .corner .rank{ font-size:12px; } .card .corner .suit{ font-size:9px; }
+    .card .center-suit{ font-size:24px; }
+    .card.hero-card{ width:58px; height:82px; }
+    .card.hero-card .center-suit{ font-size:30px; }
+    .card-back{ width:32px; height:45px; }
+    .empty-slot{ width:48px; height:67px; }
+    .community-row{ gap:6px; }
+    .pot-pill{ padding:4px 13px; gap:6px; } .pot-pill .amount{ font-size:13px; }
+
+    .avatar{ width:38px; height:38px; font-size:14px; }
+    .seat.hero .avatar{ width:46px; height:46px; font-size:17px; }
+    .info-panel{ min-width:82px; padding:4px 10px; border-radius:8px; }
+    .info-name{ font-size:9.5px; } .seat.hero .info-name{ font-size:10px; }
+    .info-stack{ font-size:13px; } .seat.hero .info-stack{ font-size:14px; }
+    .info-status{ font-size:8px; } .seat.hero .info-status{ font-size:8.5px; }
+    .chip-dot{ width:10px; height:10px; }
+    .chip-stack{ width:19px; height:25px; } .chip-stack .chip{ width:19px; height:19px; }
+    .chip-amt{ font-size:9px; padding:1px 4px; }
+
+    .action-panel{ padding:10px 18px 12px; }
+    .action-inner{ gap:18px; }
+    .raise-panel{ min-width:260px; }
+    .qb{ font-size:10px; padding:4px 10px; }
+    .abtn{ min-width:84px; font-size:13px; padding:11px 16px 9px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Shown instead of the table whenever the phone is held upright -->
+<div class="portrait-lock">
+  <div class="icon">📱</div>
+  <h2>Rotate your phone to landscape</h2>
+  <p>This table is designed for phones held sideways — turn your device to sit down and play.</p>
+</div>
+
+<div class="app">
+
+  <!-- ══════════════════════════════ HEADER ══════════════════════════════ -->
+  <header class="header">
+    <div class="header-left">
+      <span class="table-name">Midnight Aces — Table 3</span>
+      <span class="phase-badge">Flop</span>
+      <button class="last-hand-btn">Last Hand</button>
+    </div>
+    <div class="header-right">
+      <span class="blinds-label">100 / 200</span>
+      <button class="icon-btn" title="Chat">💬</button>
+      <button class="icon-btn" title="Mute">🔊</button>
+      <button class="leave-btn">Leave</button>
+      <span class="status-dot" title="Connected"></span>
+    </div>
+  </header>
+
+  <!-- ══════════════════════════════ TABLE ════════════════════════════════ -->
+  <div class="table-wrap">
+    <div class="table-surface">
+      <div class="table-glow"></div>
+      <div class="table-rail"></div>
+      <div class="table-felt"></div>
+
+      <!-- centre: pot + community cards -->
+      <div class="table-center">
+        <div class="center-stack">
+          <div class="pot-pill">
+            <span class="label">Pot</span>
+            <span class="chip-dot black" style="width:9px;height:9px;"></span>
+            <span class="amount">18,400</span>
+          </div>
+          <div class="community-row">
+            <div class="card diamonds"><div class="corner"><span class="rank">9</span><span class="suit">♦</span></div><div class="center-suit">♦</div></div>
+            <div class="card spades"><div class="corner"><span class="rank">Q</span><span class="suit">♠</span></div><div class="center-suit">♠</div></div>
+            <div class="card hearts"><div class="corner"><span class="rank">7</span><span class="suit">♥</span></div><div class="center-suit">♥</div></div>
+            <div class="card clubs"><div class="corner"><span class="rank">A</span><span class="suit">♣</span></div><div class="center-suit">♣</div></div>
+            <div class="empty-slot"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════ SEATS (vector-based: panel outward / chips inward) ══════════════════ -->
+
+      <!-- Seat 1 — HERO (bottom centre): chips above cards, cards above panel -->
+      <div class="seat hero turn seat-1">
+        <div class="seat-pod dir-bottom">
+          <div class="hero-bet" style="display:flex;flex-direction:column;align-items:center;gap:1px;">
+            <div class="chip-stack">
+              <div class="chip" style="bottom:0;background:radial-gradient(circle at 35% 30%,#fde047,#713f12);"></div>
+              <div class="chip" style="bottom:3px;background:radial-gradient(circle at 35% 30%,#fde047,#713f12);"></div>
+            </div>
+            <span class="chip-amt">2,000</span>
+          </div>
+          <div class="avatar">
+            Y
+            <span class="badge dealer">D</span>
+          </div>
+          <div class="hole-cards">
+            <div class="card hero-card spades"><div class="corner"><span class="rank">A</span><span class="suit">♠</span></div><div class="center-suit">♠</div></div>
+            <div class="card hero-card hearts"><div class="corner"><span class="rank">K</span><span class="suit">♥</span></div><div class="center-suit">♥</div></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">You</div>
+            <div class="info-stack"><span class="chip-dot black"></span>24,500</div>
+            <div class="info-status st-turn">Your Turn</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 2 — bottom-left: folded -->
+      <div class="seat folded seat-2">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">S</div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Sofia</div>
+            <div class="info-stack"><span class="chip-dot white"></span>18,200</div>
+            <div class="info-status st-folded">Folded</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 3 — left, lower: called, small blind -->
+      <div class="seat seat-3">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">
+            M
+            <span class="badge sb">SB</span>
+          </div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Marcus</div>
+            <div class="info-stack"><span class="chip-dot green"></span>32,750</div>
+            <div class="info-status st-called">Called</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 4 — left, upper: all-in -->
+      <div class="seat seat-4">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">E</div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Elena</div>
+            <div class="info-stack"><span class="chip-dot purple"></span>9,400</div>
+            <div class="info-status st-allin">All-In</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 5 — top-left: raised, dealer button -->
+      <div class="seat seat-5">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">
+            D
+            <span class="badge dealer">D</span>
+          </div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Dmitri</div>
+            <div class="info-stack"><span class="chip-dot black"></span>41,000</div>
+            <div class="info-status st-raised">Raised</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 6 — top-right: folded -->
+      <div class="seat folded seat-6">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">P</div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Priya</div>
+            <div class="info-stack"><span class="chip-dot blue"></span>27,600</div>
+            <div class="info-status st-folded">Folded</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 7 — right, upper: called, big blind -->
+      <div class="seat seat-7">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">
+            C
+            <span class="badge bb">BB</span>
+          </div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Carlos</div>
+            <div class="info-stack"><span class="chip-dot blue"></span>15,300</div>
+            <div class="info-status st-called">Called</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 8 — right, lower: waiting -->
+      <div class="seat seat-8">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">W</div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Wei</div>
+            <div class="info-stack"><span class="chip-dot green"></span>22,900</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Seat 9 — bottom-right: raised -->
+      <div class="seat seat-9">
+        <div class="seat-pod dir-stack">
+          <div class="avatar">N</div>
+          <div class="hole-cards">
+            <div class="card-back"></div>
+            <div class="card-back"></div>
+          </div>
+          <div class="info-panel">
+            <div class="info-name">Nadia</div>
+            <div class="info-stack"><span class="chip-dot black"></span>36,150</div>
+            <div class="info-status st-raised">Raised</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══════════════════ BET CHIPS — separate elements, closer to centre ══════════════════ -->
+      <div class="bet-chips chip-3">
+        <div class="mini-blind sb">SB</div>
+        <div class="chip-stack"><div class="chip" style="bottom:0;background:radial-gradient(circle at 35% 30%,#4ade80,#14532d);"></div></div>
+        <span class="chip-amt">200</span>
+      </div>
+
+      <div class="bet-chips chip-5">
+        <div class="chip-stack">
+          <div class="chip" style="bottom:0;background:radial-gradient(circle at 35% 30%,#475569,#020617);"></div>
+          <div class="chip" style="bottom:3px;background:radial-gradient(circle at 35% 30%,#475569,#020617);"></div>
+          <div class="chip" style="bottom:6px;background:radial-gradient(circle at 35% 30%,#475569,#020617);"></div>
+        </div>
+        <span class="chip-amt">6,000</span>
+      </div>
+
+      <div class="bet-chips chip-7">
+        <div class="mini-blind bb">BB</div>
+        <div class="chip-stack"><div class="chip" style="bottom:0;background:radial-gradient(circle at 35% 30%,#60a5fa,#1e3a8a);"></div></div>
+        <span class="chip-amt">400</span>
+      </div>
+
+      <div class="bet-chips chip-9">
+        <div class="chip-stack">
+          <div class="chip" style="bottom:0;background:radial-gradient(circle at 35% 30%,#475569,#020617);"></div>
+          <div class="chip" style="bottom:3px;background:radial-gradient(circle at 35% 30%,#475569,#020617);"></div>
+        </div>
+        <span class="chip-amt">6,000</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════ ACTION PANEL ═════════════════════════ -->
+  <div class="action-panel">
+    <div class="action-inner">
+
+      <div class="raise-panel">
+        <div class="quick-bets">
+          <button class="qb">Min</button>
+          <button class="qb">½ Pot</button>
+          <button class="qb">Pot</button>
+          <button class="qb">Max</button>
+        </div>
+        <div class="raise-row">
+          <div class="raise-to">
+            <span class="lbl">Raise to</span>
+            <span class="val" id="raiseVal">6,000</span>
+          </div>
+          <input type="range" class="raise-slider" id="raiseSlider" min="2000" max="24500" value="6000"
+                 oninput="document.getElementById('raiseVal').textContent = Number(this.value).toLocaleString('en-US'); this.querySelector ? null : null; this.style.setProperty('--p', ((this.value-this.min)/(this.max-this.min)*100)+'%');">
+        </div>
+      </div>
+
+      <div class="action-buttons">
+        <button class="abtn fold">Fold<span class="sub">Muck</span></button>
+        <button class="abtn call">Call<span class="sub">2,000</span></button>
+        <button class="abtn raise">Raise<span class="sub">to 6,000</span></button>
+        <button class="abtn allin">All-In<span class="sub">24,500</span></button>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

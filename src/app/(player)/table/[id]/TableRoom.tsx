@@ -14,6 +14,7 @@ import type {
   SeatInfo,
   ChatMessage,
   BreakStatePayload,
+  ReactionType,
 } from '@/lib/socket/types'
 import { getSocket } from '@/lib/socket/client'
 import type { AppSocket } from '@/lib/socket/client'
@@ -566,6 +567,69 @@ function ChipFlight({ flight, onDone }: { flight: ChipFlightData; onDone: (id: s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ReactionFlight — a targeted live reaction (Trash / Tissue) image flying from the
+// sender's seat to the receiver's seat. Purely visual: never touches game state,
+// never persisted, mirrors the ChipFlight animation shape above.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REACTION_IMAGE_SRC: Record<ReactionType, string> = {
+  trash: '/reactions/trash.png',
+  tissue: '/reactions/tissue.png',
+}
+const REACTION_FLIGHT_MS = 700
+
+// Reaction picker footprint — kept as constants (rather than measured post-mount) so its
+// placement can be clamped synchronously in the same render as the click that opens it.
+// Must track the button/icon/gap/padding sizes below if those ever change.
+const REACTION_PICKER_W = 108
+const REACTION_PICKER_H = 56
+const REACTION_PICKER_GAP = 10     // gap between the seat pod and the picker
+const REACTION_PICKER_MARGIN = 8   // min clearance from the table container's edges
+
+type ReactionFlightData = {
+  id: string
+  from: { left: string; top: string }
+  to: { left: string; top: string }
+  reactionType: ReactionType
+}
+
+function ReactionFlight({ flight, onDone }: { flight: ReactionFlightData; onDone: (id: string) => void }) {
+  const [stage, setStage] = useState<'start' | 'flying' | 'landed'>('start')
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setStage('flying'))
+    const landTimer = setTimeout(() => setStage('landed'), REACTION_FLIGHT_MS)
+    const doneTimer = setTimeout(() => onDone(flight.id), REACTION_FLIGHT_MS + 250)
+    return () => { cancelAnimationFrame(raf); clearTimeout(landTimer); clearTimeout(doneTimer) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const pos = stage === 'start' ? flight.from : flight.to
+  const landed = stage === 'landed'
+
+  return (
+    <div style={{
+      position: 'absolute',
+      left: pos.left, top: pos.top,
+      transform: `translate(-50%,-50%) scale(${landed ? 1.3 : 1})`,
+      opacity: landed ? 0 : 1,
+      transition: stage === 'start'
+        ? 'none'
+        : `left ${REACTION_FLIGHT_MS}ms cubic-bezier(.22,.61,.36,1), top ${REACTION_FLIGHT_MS}ms cubic-bezier(.22,.61,.36,1), transform 250ms ease-out, opacity 250ms ease-out`,
+      zIndex: 50,
+      pointerEvents: 'none',
+    }}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={REACTION_IMAGE_SRC[flight.reactionType]}
+        alt={flight.reactionType}
+        style={{ width: 40, height: 40, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.6))' }}
+      />
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DealerButton
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -580,6 +644,42 @@ function DealerButton() {
       boxShadow: '0 1px 3px rgba(0,0,0,0.5)',
       flexShrink: 0,
     }}>D</span>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TurnTimerEdge — the active player's countdown, rendered as a small corner
+// badge plus a depleting strip along the info panel's bottom edge, instead of
+// a separate floating ring. Parent must be `position: relative`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function TurnTimerEdge({ timeLeft, cornerRadius }: { timeLeft: number; cornerRadius: number }) {
+  const color = timeLeft <= 10 ? '#ef4444' : timeLeft <= 20 ? '#f59e0b' : '#c9a84c'
+  return (
+    <>
+      <div style={{
+        position: 'absolute', top: -8, right: -8, zIndex: 3,
+        width: 18, height: 18, borderRadius: '50%',
+        background: '#0b0f1a', border: `2px solid ${color}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontFamily: '"JetBrains Mono",monospace', fontSize: 9, fontWeight: 800,
+        color, boxShadow: `0 0 8px ${color}88`,
+      }}>
+        {timeLeft}
+      </div>
+      <div style={{
+        position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 1,
+        height: 3, borderRadius: `0 0 ${cornerRadius}px ${cornerRadius}px`, overflow: 'hidden',
+        background: 'rgba(255,255,255,0.1)',
+      }}>
+        <div style={{
+          height: '100%',
+          width: `${Math.min(100, Math.max(0, (timeLeft / TIMER_TOTAL) * 100))}%`,
+          background: color,
+          transition: 'width 0.25s linear, background 0.3s',
+        }} />
+      </div>
+    </>
   )
 }
 
@@ -988,6 +1088,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const router = useRouter()
 
   const [state, setState]                = useState<TableStatePayload>(initialState)
+  const stateRef = useRef(state)
+  useEffect(() => { stateRef.current = state }, [state])
   const [leaving, setLeaving]            = useState(false)
   const [connected, setConnected]        = useState(false)
   const [myHoleCards, setMyHoleCards]    = useState<[Card, Card] | null>(null)
@@ -1158,6 +1260,99 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     document.addEventListener('fullscreenchange', handler)
     return () => document.removeEventListener('fullscreenchange', handler)
   }, [])
+
+  // ── Targeted live reactions (visual only — never persisted, never touches game state) ──
+  const [reactionFlights, setReactionFlights] = useState<ReactionFlightData[]>([])
+  // left/top are final, already-clamped pixel coordinates (relative to tableInnerRef),
+  // fully computed inside the seat pod's onClick handler below — NOT derived from
+  // seatPos()'s percentages (which don't reflect the mobile-landscape layout's
+  // --mleft/--mtop/--mscale transform overrides) and NOT recomputed during render
+  // (reading refs during render is disallowed — see the click handler for why).
+  const [reactionPicker, setReactionPicker] = useState<{
+    seatNumber: number
+    playerId: string
+    left: number
+    top: number
+  } | null>(null)
+  const reactionFlightIdRef = useRef(0)
+  const tableInnerRef = useRef<HTMLDivElement>(null)
+  const removeReactionFlight = (id: string) => setReactionFlights(prev => prev.filter(f => f.id !== id))
+
+  // Toggles the reaction picker for a clicked opponent seat, positioning it from the
+  // seat pod's real DOM rect rather than seatPos()'s percentages — on mobile-landscape
+  // those percentages are overridden by the --mleft/--mtop/--mscale transform, so they
+  // don't match where the pod actually rendered, but the live DOM rect always does.
+  // Deliberately reads reactionPicker/tableInnerRef here in the handler body — NOT
+  // inside the setReactionPicker call below — since setState updater functions must
+  // stay pure (no ref/DOM reads).
+  function toggleReactionPicker(seatEl: HTMLElement, seatNumber: number, playerId: string) {
+    if (reactionPicker?.seatNumber === seatNumber) {
+      console.debug('[reaction] picker closed', { seatNumber })
+      setReactionPicker(null)
+      return
+    }
+
+    const seatRect = seatEl.getBoundingClientRect()
+    const containerRect = tableInnerRef.current?.getBoundingClientRect()
+    const containerW = containerRect?.width ?? 0
+    const containerH = containerRect?.height ?? 0
+    const anchorLeft = containerRect ? seatRect.left - containerRect.left : 0
+    const anchorTop = containerRect ? seatRect.top - containerRect.top : 0
+    const anchorWidth = seatRect.width
+    const anchorHeight = seatRect.height
+
+    // Horizontal: centered on the seat by default; flip to open on whichever side has
+    // room when the centered picker would run past the container edge.
+    const seatCenterX = anchorLeft + anchorWidth / 2
+    let left: number
+    if (seatCenterX + REACTION_PICKER_W / 2 > containerW - REACTION_PICKER_MARGIN) {
+      // Near the right edge — open to the LEFT of the seat.
+      left = anchorLeft - REACTION_PICKER_W - REACTION_PICKER_GAP
+    } else if (seatCenterX - REACTION_PICKER_W / 2 < REACTION_PICKER_MARGIN) {
+      // Near the left edge — open to the RIGHT of the seat.
+      left = anchorLeft + anchorWidth + REACTION_PICKER_GAP
+    } else {
+      left = seatCenterX - REACTION_PICKER_W / 2
+    }
+
+    // Vertical: above the seat by default; flip to BELOW when too close to the top.
+    // (Seats near the bottom/hero row naturally have room above, so the default
+    // already satisfies "open above the seat" for that case.)
+    let top: number
+    if (anchorTop - REACTION_PICKER_H - REACTION_PICKER_GAP < REACTION_PICKER_MARGIN) {
+      top = anchorTop + anchorHeight + REACTION_PICKER_GAP
+    } else {
+      top = anchorTop - REACTION_PICKER_H - REACTION_PICKER_GAP
+    }
+
+    // Final clamp — the hard guarantee that the picker can never render outside the
+    // visible table container, regardless of which branch fired above.
+    left = Math.min(
+      Math.max(left, REACTION_PICKER_MARGIN),
+      Math.max(REACTION_PICKER_MARGIN, containerW - REACTION_PICKER_W - REACTION_PICKER_MARGIN)
+    )
+    top = Math.min(
+      Math.max(top, REACTION_PICKER_MARGIN),
+      Math.max(REACTION_PICKER_MARGIN, containerH - REACTION_PICKER_H - REACTION_PICKER_MARGIN)
+    )
+
+    const next = { seatNumber, playerId, left, top }
+    console.debug('[reaction] picker opened', next)
+    setReactionPicker(next)
+  }
+
+  function sendReaction(toPlayerId: string, reactionType: ReactionType) {
+    console.debug('[reaction] clicked', { reactionType, toPlayerId })
+    setReactionPicker(null)
+    const socket = socketRef.current
+    if (!socket) {
+      console.debug('[reaction] send_reaction NOT emitted — socket not ready')
+      return
+    }
+    const payload = { tableId: initialState.tableId, toPlayerId, reactionType }
+    console.debug('[reaction] emitting send_reaction', payload)
+    socket.emit('send_reaction', payload)
+  }
 
   // ── Chip flight animations (visual only — never touches game state) ────────
   const [chipFlights, setChipFlights] = useState<ChipFlightData[]>([])
@@ -1591,6 +1786,27 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         }
       }
 
+      const onReactionSent = (p: { tableId: string; fromPlayerId: string; toPlayerId: string; reactionType: ReactionType }) => {
+        console.debug('[reaction] client received reaction_sent', p)
+        if (!active || p.tableId !== initialState.tableId) return
+        const s = stateRef.current
+        const fromSeat = s.seats.find(seat => seat.playerId === p.fromPlayerId)?.seatNumber
+        const toSeat = s.seats.find(seat => seat.playerId === p.toPlayerId)?.seatNumber
+        if (fromSeat === undefined || toSeat === undefined) {
+          console.debug('[reaction] dropped — could not resolve seat for sender or receiver', { fromSeat, toSeat })
+          return
+        }
+        const m = s.maxPlayers
+        const heroSeat = s.seats.find(seat => seat.playerId === currentUserId)?.seatNumber
+        const a = heroSeat ?? mySeatNumber ?? 1
+        setReactionFlights(prev => [...prev, {
+          id: `rx${reactionFlightIdRef.current++}`,
+          from: seatAnchorPos(toVisual(fromSeat, a, m), m),
+          to: seatAnchorPos(toVisual(toSeat, a, m), m),
+          reactionType: p.reactionType,
+        }])
+      }
+
       const onChatMessage = (p: ChatMessage) => {
         if (!active || p.tableId !== initialState.tableId) return
         setChatMessages(prev => {
@@ -1615,6 +1831,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('break_update', onBreakUpdate)
       socket.on('kicked_from_table', onKickedFromTable)
       socket.on('table_chat_message', onChatMessage)
+      socket.on('reaction_sent', onReactionSent)
 
       if (socket.connected) {
         socket.emit(myStatus === 'seated' ? 'join_table' : 'spectate_table', { tableId: initialState.tableId })
@@ -1631,6 +1848,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('session_update', onSessionUpdate); socket.off('break_update', onBreakUpdate)
         socket.off('kicked_from_table', onKickedFromTable)
         socket.off('table_chat_message', onChatMessage)
+        socket.off('reaction_sent', onReactionSent)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
         if (kickedOverlayTimerRef.current) { clearTimeout(kickedOverlayTimerRef.current); kickedOverlayTimerRef.current = null }
         heroCardTimersRef.current.forEach(clearTimeout); heroCardTimersRef.current = []
@@ -2315,7 +2533,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             justifyContent: 'center',
           }}>
             {/* aspect-ratio + max-height: 100% keeps the oval inside available space on every screen size */}
-            <div className="tbl-table-inner" data-seatcount={max} style={{
+            <div ref={tableInnerRef} className="tbl-table-inner" data-seatcount={max} onClick={() => setReactionPicker(null)} style={{
               width: '100%',
               maxWidth: 770,
               aspectRatio: '1.72',
@@ -2507,9 +2725,15 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                     {/* Seat pod */}
                     <div
   className={`tbl-seat-pod ${podClass} ${mobileAnchorClass(vs, max)}`}
+  onClick={(e) => {
+    if (layoutPreview || !occ || !seat.playerId || seat.playerId === currentUserId || mySeatNumber == null) return
+    e.stopPropagation()
+    toggleReactionPicker(e.currentTarget, seat.seatNumber, seat.playerId)
+  }}
   style={{
     ...seatPos(vs, max),
     ...mobileSeatVars(vs, max),
+    cursor: (!layoutPreview && occ && seat.playerId !== currentUserId && mySeatNumber != null) ? 'pointer' : undefined,
   }}
 >
                       {!occ ? (
@@ -2589,57 +2813,24 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         if (showBlindLabels && isBB) displayName += ' · BB'
                         const stackDisplay = eliminated ? formatNumber(0) : hp ? formatNumber(hp.stack) : sdP ? formatNumber(sdP.finalStack) : '—'
 
-                        // Shared avatar circle
-                        const avatarCircle = (
-                          <div style={{ position: 'relative', flexShrink: 0 }}>
-                            <div className={isHero ? 'tbl-player-circle-hero' : 'tbl-player-circle'} style={{
-                              width: isHero ? 48 : 42, height: isHero ? 48 : 42,
-                              borderRadius: '50%',
-                              background: isMe
-                                ? 'radial-gradient(circle at 38% 35%, #1e3a5f, #0f2040)'
-                                : 'radial-gradient(circle at 38% 35%, #1e2a3a, #0f1824)',
-                              border: isTurn
-                                ? '2px solid #c9a84c'
-                                : isWinner
-                                ? '2px solid rgba(201,168,76,0.7)'
-                                : isMe
-                                ? '2px solid rgba(201,168,76,0.4)'
-                                : '2px solid rgba(255,255,255,0.12)',
-                              boxShadow: isTurn
-                                ? '0 0 0 3px rgba(201,168,76,0.2),0 0 14px rgba(201,168,76,0.4)'
-                                : isWinner
-                                ? '0 0 12px rgba(201,168,76,0.3)'
-                                : 'none',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              fontSize: isHero ? 18 : 15, fontWeight: 700, lineHeight: 1,
-                              color: isMe ? '#e8c97a' : '#64748b',
-                              letterSpacing: '-0.5px',
-                              opacity: dimmed ? 0.3 : 1, transition: 'opacity 0.2s',
-                              overflow: 'hidden', position: 'relative',
-                            }}>
-                              <span style={{ position: 'relative', zIndex: 1 }}>
-                                {(seat.username ?? '?').charAt(0).toUpperCase()}
-                              </span>
-                            </div>
-                            {isD && (
-                              <div style={{ position: 'absolute', bottom: -2, right: -3, zIndex: 5 }}>
-                                <DealerButton />
-                              </div>
-                            )}
-                          </div>
-                        )
-
-                        // Shared seat pill
+                        // Shared seat pill — carries the dealer button and turn-timer badge on
+                        // its own edges now (no more avatar circle to anchor them to).
                         const seatPill = (
                           <div className="tbl-seat-pill" style={{
+                            position: 'relative',
                             background: 'rgba(54, 51, 51, 0.5)',
                             border: `1px solid ${isTurn ? 'rgba(201,168,76,0.35)' : 'rgba(255,255,255,0.07)'}`,
                             borderRadius: 8, padding: '3px 10px', textAlign: 'center', minWidth: 72,
                             backdropFilter: 'blur(4px)',
                             boxShadow: isTurn ? '0 0 10px rgba(201,168,76,0.15)' : 'none',
                             opacity: dimmed ? 0.45 : 1, transition: 'opacity 0.2s',
-                            transform: 'translate(-10px, -3px)',
                           }}>
+                            {isD && (
+                              <div style={{ position: 'absolute', top: -8, left: -8, zIndex: 3 }}>
+                                <DealerButton />
+                              </div>
+                            )}
+                            {showTmr && <TurnTimerEdge timeLeft={timeLeft} cornerRadius={8} />}
                             <div className="tbl-seat-pill-name" style={{ fontSize: 9, letterSpacing: '1.2px', textTransform: 'uppercase', color: isMe ? '#c9a84c' : 'rgba(245,236,215,0.5)', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 90 }}>
                               {displayName}
                             </div>
@@ -2657,7 +2848,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
  if (isHero) {
   // Hero: clean bottom row
-  // [ avatar + optional bet ]   [ hole cards ]   [ compact name / stack pill ]
+  // [ hole cards ]   [ compact name / stack pill ]
   return (
     <div
       className="tbl-hero-row"
@@ -2671,22 +2862,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         pointerEvents: 'none',
       }}
     >
-      {/* Left: avatar circle only */}
-      <div
-        className="tbl-hero-avatar-col"
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 1,
-          flexShrink: 0,
-        }}
-      >
-        {avatarCircle}
-      </div>
-
-      {/* Middle: bet chip (if any) stacked just above the hero hole cards */}
+      {/* Left: bet chip (if any) stacked just above the hero hole cards */}
       <div
         className="tbl-hero-cards-col"
         style={{
@@ -2792,7 +2968,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         )}
       </div>
 
-      {/* Right: timer + compact player info */}
+      {/* Right: compact player info — dealer button and turn-timer badge sit on
+          this panel's own edges now that there's no avatar circle to anchor to. */}
       <div
         className="tbl-hero-info-col"
         style={{
@@ -2804,52 +2981,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           flexShrink: 0,
         }}
       >
-        {showTmr && (
-          <div style={{ position: 'relative', width: 28, height: 28, flexShrink: 0 }}>
-            <svg
-              viewBox="0 0 44 44"
-              fill="none"
-              style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}
-            >
-              <circle cx="22" cy="22" r="19" stroke="rgba(255,255,255,0.08)" strokeWidth="3.5" fill="none" />
-              <circle
-                cx="22"
-                cy="22"
-                r="19"
-                fill="none"
-                stroke={timeLeft <= 10 ? '#ef4444' : timeLeft <= 20 ? '#f59e0b' : '#c9a84c'}
-                strokeWidth="3.5"
-                strokeLinecap="round"
-                strokeDasharray={`${Math.max(0, (timeLeft / TIMER_TOTAL) * 119.4).toFixed(1)} 119.4`}
-              />
-            </svg>
-
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <span
-                style={{
-                  fontFamily: '"JetBrains Mono",monospace',
-                  fontSize: 9,
-                  fontWeight: 700,
-                  color: '#f59e0b',
-                }}
-              >
-                {timeLeft}
-              </span>
-            </div>
-          </div>
-        )}
-
         <div
           className="tbl-seat-pill tbl-hero-pill"
           style={{
+            position: 'relative',
             background: 'rgba(41, 41, 41, 0.47)',
             border: `1px solid ${isTurn ? 'rgba(201,168,76,0.45)' : 'rgba(255,255,255,0.08)'}`,
             borderRadius: 7,
@@ -2864,6 +2999,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             transition: 'opacity 0.2s',
           }}
         >
+          {isD && (
+            <div style={{ position: 'absolute', top: -8, left: -8, zIndex: 3 }}>
+              <DealerButton />
+            </div>
+          )}
+          {showTmr && <TurnTimerEdge timeLeft={timeLeft} cornerRadius={7} />}
           <div
             className="tbl-hero-pill-name"
             style={{
@@ -2917,34 +3058,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 }
 
                         return (
-                          <div className="tbl-opponent-seat" style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                            {avatarCircle}
+                          <div className="tbl-opponent-seat" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+                            {seatPill}
                             {sideCardNode}
-                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-                              {showTmr && (
-                                <div
-  style={{
-    position: 'relative',
-    width: 24,
-    height: 24,
-    flexShrink: 0,
-  }}
->
-                                  <svg viewBox="0 0 44 44" fill="none" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
-                                    <circle cx="22" cy="22" r="19" stroke="rgba(255,255,255,0.08)" strokeWidth="3.5" fill="none" />
-                                    <circle cx="22" cy="22" r="19" fill="none"
-                                      stroke={timeLeft <= 10 ? '#ef4444' : timeLeft <= 20 ? '#f59e0b' : '#c9a84c'}
-                                      strokeWidth="3.5" strokeLinecap="round"
-                                      strokeDasharray={`${Math.max(0, (timeLeft / TIMER_TOTAL) * 119.4).toFixed(1)} 119.4`}
-                                    />
-                                  </svg>
-                                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                    <span style={{ fontFamily: '"JetBrains Mono",monospace', fontSize: 8, fontWeight: 700, color: '#f59e0b' }}>{timeLeft}</span>
-                                  </div>
-                                </div>
-                              )}
-                              {seatPill}
-                            </div>
                           </div>
                         )
                       })()}
@@ -2957,6 +3073,83 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               {chipFlights.map(f => (
                 <ChipFlight key={f.id} flight={f} onDone={removeChipFlight} />
               ))}
+
+              {/* Reaction flight overlay — purely visual, sits above seat pods and bet stacks */}
+              {reactionFlights.map(f => (
+                <ReactionFlight key={f.id} flight={f} onDone={removeReactionFlight} />
+              ))}
+
+              {/* Reaction picker — small Trash/Tissue popup shown near the clicked seat.
+                  Buttons render as bare floating icons (transparent images, no card/background)
+                  per design; only the picker's own glass panel has a background.
+                  left/top are already fully computed and clamped by the seat pod's onClick
+                  handler above (using the seat's real DOM rect, not seatPos()'s percentages —
+                  see the handler for why) — this block just renders them. */}
+              {reactionPicker && !layoutPreview && (() => {
+                return (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                      position: 'absolute',
+                      left: reactionPicker.left,
+                      top: reactionPicker.top,
+                      width: 'max-content',
+                      zIndex: 500,
+                      display: 'flex',
+                      flexDirection: 'row',
+                      flexWrap: 'nowrap',
+                      whiteSpace: 'nowrap',
+                      gap: 10,
+                      background: 'rgba(15,15,20,0.85)',
+                      backdropFilter: 'blur(6px)',
+                      borderRadius: 14,
+                      padding: '8px 10px',
+                      boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                      pointerEvents: 'auto',
+                    }}
+                  >
+                    {(['trash', 'tissue'] as ReactionType[]).map(rt => (
+                      <button
+                        key={rt}
+                        type="button"
+                        className="tbl-reaction-btn"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          sendReaction(reactionPicker.playerId, rt)
+                        }}
+                        title={rt === 'trash' ? 'Trash' : 'Tissue'}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          outline: 'none',
+                          padding: 2,
+                          margin: 0,
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          pointerEvents: 'auto',
+                          zIndex: 1,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={REACTION_IMAGE_SRC[rt]}
+                          alt={rt}
+                          draggable={false}
+                          style={{
+                            width: 32,
+                            height: 32,
+                            pointerEvents: 'none',
+                            filter: 'drop-shadow(0 2px 5px rgba(0,0,0,0.6))',
+                          }}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                )
+              })()}
 
             </div>
           </div>
@@ -2991,6 +3184,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           @keyframes card-deal-in{from{opacity:0;transform:translateY(-16px) scale(0.84) rotate(-5deg)}to{opacity:1;transform:translateY(0) scale(1) rotate(0deg)}}
           @keyframes pot-pulse{0%{transform:translateY(16px) scale(1)}45%{transform:translateY(16px) scale(1.14)}100%{transform:translateY(16px) scale(1)}}
           @keyframes winner-toast-in{from{opacity:0;transform:translateX(-50%) translateY(-10px) scale(0.9)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+          .tbl-reaction-btn{transition:transform 0.15s ease, filter 0.15s ease; -webkit-tap-highlight-color:transparent;}
+          .tbl-reaction-btn:hover{transform:scale(1.18); filter:drop-shadow(0 0 6px rgba(255,255,255,0.4));}
+          .tbl-reaction-btn:active{transform:scale(0.9);}
           .ap-range{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;outline:none;cursor:pointer;}
           .ap-range::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
           .ap-range::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
@@ -3071,8 +3267,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-pot-amount{font-size:10px!important;}
 
             /* Seat pods */
-            .tbl-player-circle{width:30px!important;height:30px!important;font-size:13px!important;}
-            .tbl-player-circle-hero{width:36px!important;height:36px!important;font-size:17px!important;}
             .tbl-seat-pill{padding:1px 6px!important;min-width:48px!important;border-radius:5px!important;}
             /* Pre-scale sizes — this pod is wrapped in transform:scale(--mscale) below
                (as low as 0.54 at 9-max), so these render ~6.5-8px on screen, not their
@@ -3100,11 +3294,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               gap:7px!important;
               padding:0 4px!important;
               align-items:center!important;
-            }
-
-            .tbl-hero-avatar-col{
-              gap:2px!important;
-               transform:translate(0px, 40px);
             }
 
             .tbl-hero-bet-stack{
@@ -3186,9 +3375,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               top:var(--mtop)!important;
             }
 
-            /* Neutralise the desktop seat-pill nudge so pills line up with the new anchors */
-            .tbl-seat-pill{ transform:none!important; }
-
             /* Panel */
             .tbl-panel-outer{position:relative!important;z-index:20!important;}
             .tbl-panel-inner{min-height:0!important;align-items:stretch!important;}
@@ -3226,8 +3412,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           @media (max-height:380px) and (orientation:landscape){
             .tbl-header{height:26px!important;}
             .tbl-chat-panel{width:160px!important;top:30px!important;bottom:54px!important;}
-            .tbl-player-circle{width:26px!important;height:26px!important;font-size:11px!important;}
-            .tbl-player-circle-hero{width:30px!important;height:30px!important;font-size:14px!important;}
             .tbl-seat-pill{padding:1px 4px!important;min-width:38px!important;}
             /* Pre-scale sizes — see the mscale comment in the (max-height:500px) block
                above. Worst-case tier here is --mscale:0.3 (7-9 max), which puts these

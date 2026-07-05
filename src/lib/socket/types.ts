@@ -40,6 +40,9 @@ export type PublicHandState = {
   players: PublicPlayerHandState[]
 }
 
+// ── Live reactions (targeted, not persisted) ───────────────────────────────
+export type ReactionType = 'trash' | 'tissue'
+
 // ── Client → Server ────────────────────────────────────────────────────────
 export interface ClientToServerEvents {
   join_table: (payload: { tableId: string }) => void
@@ -71,6 +74,9 @@ export interface ClientToServerEvents {
   start_break: (payload: { tableId: string }) => void
   // Live table chat — sender must be seated or spectating this table.
   table_chat_send: (payload: { tableId: string; message: string }) => void
+  // Targeted live reaction (e.g. Trash / Tissue) flown from sender seat to a target
+  // player's seat. Purely visual — never persisted, never touches game state.
+  send_reaction: (payload: { tableId: string; toPlayerId: string; reactionType: ReactionType }) => void
 }
 
 // ── Public payload types ───────────────────────────────────────────────────
@@ -217,6 +223,14 @@ export interface ServerToClientEvents {
   table_chat_message: (payload: ChatMessage) => void
   // Emitted directly to a player's socket(s) when an admin adjusts their chip balance.
   wallet_update: (payload: { chips: number }) => void
+  // Broadcast to everyone at the table when a player sends a targeted live reaction.
+  // Purely visual — never persisted, never touches game state.
+  reaction_sent: (payload: {
+    tableId: string
+    fromPlayerId: string
+    toPlayerId: string
+    reactionType: ReactionType
+  }) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────
