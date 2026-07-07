@@ -849,11 +849,27 @@ nextApp.prepare().then(() => {
 
   // ── Stale-seat cleanup ────────────────────────────────────────────────────
   // Marks seated rows as left for any player with no live socket in the table room.
-  // Called before join and before starting the first hand of a session, so ghost
-  // players from a previous server run are evicted before they can affect state.
-  async function cleanupStaleSeats(tableId: string): Promise<void> {
+  // Called before join, so ghost players from a previous server run are evicted
+  // before they can affect state.
+  //
+  // `requestingUserId` is the user who triggered this cleanup via join_table —
+  // their new socket hasn't called socket.join() yet at this point, so a
+  // reconnecting player would otherwise look "disconnected" from the room and
+  // evict their own seat out from under themselves.
+  //
+  // Players seated in the table's currently active hand are never evicted here:
+  // the hand's authoritative player/seat list (GameManager) already accounts for
+  // them, and dropping their table_players row mid-hand would free their seat
+  // number for reuse by someone else while GameManager still reports that seat
+  // as theirs — corrupting the seat-number-keyed merge in buildTableState.
+  async function cleanupStaleSeats(tableId: string, requestingUserId?: string): Promise<void> {
     const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
     const connectedUserIds = new Set(roomSockets.map(s => s.data.userId))
+    if (requestingUserId) connectedUserIds.add(requestingUserId)
+
+    const activeHandPlayerIds = new Set(
+      (gm.getPublicHandState(tableId)?.players ?? []).map(p => p.playerId)
+    )
 
     const { data: seatedRows } = await supabase
       .from('table_players')
@@ -863,7 +879,7 @@ nextApp.prepare().then(() => {
 
     const stale = (
       (seatedRows as Array<{ id: string; player_id: string; seat_number: number | null }> | null) ?? []
-    ).filter(r => !connectedUserIds.has(r.player_id))
+    ).filter(r => !connectedUserIds.has(r.player_id) && !activeHandPlayerIds.has(r.player_id))
 
     if (stale.length === 0) return
 
@@ -937,7 +953,7 @@ nextApp.prepare().then(() => {
       // When no session is active, evict ghost seats before reserving a new one.
       // This catches stale rows left behind by a server restart or crash.
       if (!sm.isActive(tableId)) {
-        await cleanupStaleSeats(tableId)
+        await cleanupStaleSeats(tableId, userId)
       }
 
       const result = await joinTable(supabase, tableId, userId)

@@ -102,10 +102,18 @@ export default async function AdminPlayersPage() {
                         {new Date(p.created_at).toLocaleDateString()}
                       </td>
                       <td className="px-5 py-3 text-right">
-                        <DeletePlayerButton
-                          playerId={p.id}
-                          username={p.username}
-                        />
+                        <div className="flex items-center justify-end gap-2">
+                          <Link
+                            href={`/admin/players/${p.id}/history`}
+                            className="rounded px-2 py-1 text-xs font-semibold text-zinc-300 border border-zinc-700 transition-colors hover:bg-zinc-800"
+                          >
+                            History
+                          </Link>
+                          <DeletePlayerButton
+                            playerId={p.id}
+                            username={p.username}
+                          />
+                        </div>
                       </td>
                     </tr>
                   ))}

@@ -165,6 +165,35 @@ export async function adjustChipsAction(
   redirect('/admin/players')
 }
 
+export async function deleteTransactionAction(
+  _state: ActionState,
+  formData: FormData
+): Promise<ActionState> {
+  const admin = await requireAdmin()
+  if (!admin) return { error: 'Unauthorized' }
+
+  const transactionId = (formData.get('transactionId') as string).trim()
+  const playerId = (formData.get('playerId') as string).trim()
+  if (!transactionId || !playerId) return { error: 'Transaction ID required' }
+
+  const adminClient = createAdminClient()
+
+  // Log-only delete: removes the history row without touching the wallet
+  // balance — the chip count reflects live state, not a replay of the ledger.
+  // Scoped to credit/debit (admin top-up/deduction) rows only — hand win/loss
+  // and other transaction types aren't editable from this history view.
+  const { error } = await adminClient
+    .from('transactions')
+    .delete()
+    .eq('id', transactionId)
+    .eq('user_id', playerId)
+    .in('type', ['credit', 'debit'])
+
+  if (error) return { error: error.message }
+
+  revalidatePath(`/admin/players/${playerId}/history`)
+}
+
 export async function deletePlayerAction(
   _state: ActionState,
   formData: FormData
