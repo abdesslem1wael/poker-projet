@@ -245,7 +245,7 @@ export default async function AdminDashboardPage() {
                   </div>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-zinc-500">Auto rake (5.5%)</span>
+                      <span className="text-zinc-500">Auto rake (3%)</span>
                       <span className="tabular-nums font-medium text-zinc-300">
                         {t.autoTips > 0 ? t.autoTips.toLocaleString() : '—'}
                       </span>
