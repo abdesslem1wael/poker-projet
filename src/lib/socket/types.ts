@@ -72,6 +72,19 @@ export interface ClientToServerEvents {
   kick_player: (payload: { tableId: string; playerId: string }) => void
   // Admin: start a scheduled break for a table.
   start_break: (payload: { tableId: string }) => void
+  // Admin: announce that only `count` more hands will be played, then the
+  // (cash-only) table closes automatically after the final one finishes.
+  // Acknowledged — the admin UI needs a definite success/failure response
+  // rather than inferring it from a broadcast that might never arrive.
+  start_last_hands: (
+    payload: { tableId: string; count: number },
+    callback: (response: { ok: true } | { ok: false; error: string }) => void
+  ) => void
+  // Admin/super_admin: top up an active Last Hands countdown (never resets it). Acknowledged.
+  add_last_hands: (
+    payload: { tableId: string; additional: number },
+    callback: (response: { ok: true } | { ok: false; error: string }) => void
+  ) => void
   // Live table chat — sender must be seated or spectating this table.
   table_chat_send: (payload: { tableId: string; message: string }) => void
   // Targeted live reaction (e.g. Trash / Tissue) flown from sender seat to a target
@@ -112,6 +125,11 @@ export type TableStatePayload = {
   // smallBlind/bigBlind above are already the CURRENT blinds for the table —
   // blindLevel is purely informational for the "Level N" badge/card display.
   blindLevel: number | null      // null for cash tables
+  // ── Last Hands (admin countdown to auto-close) ──────────────────────────
+  // Sourced straight from poker_tables (the source of truth) — never from
+  // the server's in-memory cache — so reconnecting/joining sockets always
+  // see the persisted value, even right after a server restart.
+  lastHandsRemaining: number | null   // null when not active (cash tables only)
 }
 
 // ── Showdown result (broadcast when a hand ends) ───────────────────────────
@@ -154,6 +172,12 @@ export type BreakStatePayload = {
   phase: BreakPhase | null   // null = no break in progress (used to explicitly clear client state)
   countdownSecondsRemaining: number  // meaningful while phase === 'countdown'
   breakSecondsRemaining: number      // meaningful while phase === 'active'
+}
+
+// ── Last Hands (admin-triggered countdown to a cash table's auto-close) ────
+export type LastHandsStatePayload = {
+  tableId: string
+  remaining: number | null   // null = not active (or the table has since closed)
 }
 
 // ── Table chat (live-only, not persisted) ──────────────────────────────────
@@ -219,6 +243,12 @@ export interface ServerToClientEvents {
   kicked_from_table: (payload: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => void
   // Emitted on break state changes and periodically while a break is scheduled/running.
   break_update: (payload: BreakStatePayload) => void
+  // Persistent Last Hands countdown state — drives the "Last hands: X" badge.
+  // Sent on every change and replayed to reconnecting/joining sockets.
+  last_hands_update: (payload: LastHandsStatePayload) => void
+  // One-shot announcement text for Last Hands events (e.g. "Last 10 hands
+  // announced", "9 hands remaining") — shown as a toast, not persisted state.
+  last_hands_announcement: (payload: { tableId: string; message: string }) => void
   // Live table chat — broadcast to everyone (seated + spectating) in the table room.
   table_chat_message: (payload: ChatMessage) => void
   // Emitted directly to a player's socket(s) when an admin adjusts their chip balance.

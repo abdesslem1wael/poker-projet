@@ -25,12 +25,20 @@ export async function getSocket(): Promise<AppSocket> {
     socket = null
   }
 
-  if (socket?.connected) return socket
-  // Tear down a stale disconnected socket before creating a new one.
-  if (socket) {
-    socket.disconnect()
-    socket = null
-  }
+  // Reuse the existing instance whenever one exists — whether it's already
+  // connected OR still mid-handshake. Do NOT treat "not connected yet" as
+  // "stale and needs replacing": pages that mount multiple components which
+  // each call getSocket() on mount (e.g. the admin dashboard's
+  // WatchTablesPanel + SessionPanel), or React Strict Mode's duplicate
+  // effect invoke in development, call this function concurrently. The
+  // previous logic disconnected+recreated the socket on every call that
+  // observed `connected === false`, which — since a fresh socket takes a
+  // real network round-trip to connect — meant concurrent callers kept
+  // killing each other's not-yet-connected socket before any of them ever
+  // finished the handshake, so the socket never actually connected at all.
+  // Socket.IO's own built-in reconnection logic (on by default) already
+  // handles retries; we only need a genuinely new instance on an auth change.
+  if (socket) return socket
 
   socket = io({
     // Connect to the same origin — custom server serves Next.js + Socket.io on one port.

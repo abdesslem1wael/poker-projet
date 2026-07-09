@@ -15,7 +15,9 @@ import {
 } from './src/lib/socket/table-session'
 import { GameManager } from './src/lib/socket/game-manager'
 import { SessionManager } from './src/lib/socket/session-manager'
+import { DisconnectedSeatTracker, partitionByConnection } from './src/lib/socket/seat-policy'
 import { BreakManager, BREAK_COUNTDOWN_MS, BREAK_DURATION_MS } from './src/lib/socket/break-manager'
+import { LastHandsManager } from './src/lib/socket/last-hands-manager'
 import { computeShowdown } from './src/lib/socket/showdown-helper'
 import type { HandEndedData } from './src/lib/socket/game-types'
 import type {
@@ -38,6 +40,7 @@ const handle = nextApp.getRequestHandler()
 const gm = new GameManager()
 const sm = new SessionManager()
 const bm = new BreakManager()
+const lhm = new LastHandsManager()
 
 // ── Module-level helpers ───────────────────────────────────────────────────
 
@@ -284,7 +287,7 @@ async function advanceSitGoBlinds(supabase: any, tableId: string): Promise<void>
   if (error) console.error(`[sitgo] blind level update failed  table=${tableId}`, error)
 }
 
-nextApp.prepare().then(() => {
+nextApp.prepare().then(async () => {
   // Next.js has loaded .env.local by this point.
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -293,6 +296,17 @@ nextApp.prepare().then(() => {
   const supabase = createSupabaseClient(supabaseUrl, supabaseServiceKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   })
+
+  // Hydrate the Last Hands cache from the DB — the source of truth — so an
+  // in-progress countdown survives this restart. Runs before the HTTP server
+  // starts listening, so no socket can connect before the cache is populated.
+  const { data: activeLastHandsRows } = await supabase
+    .from('poker_tables')
+    .select('id, last_hands_remaining')
+    .eq('last_hands_active', true)
+  for (const row of (activeLastHandsRows as Array<{ id: string; last_hands_remaining: number }> | null) ?? []) {
+    lhm.setRemaining(row.id, row.last_hands_remaining)
+  }
 
   const httpServer = createServer((req, res) => {
     handle(req, res)
@@ -311,12 +325,13 @@ nextApp.prepare().then(() => {
   ;(global as Record<string, unknown>).__socketIo = io
 
   // ── Turn timer ─────────────────────────────────────────────────────────────
-  const TURN_TIMEOUT_MS = 60_000  // 60 seconds per player turn
+  const TURN_TIMEOUT_MS = 35_000  // 35 seconds per player turn
   const turnTimers = new Map<string, NodeJS.Timeout>()
   const turnTimerStartedAt = new Map<string, number>()  // tableId → epoch ms
-  // Timer-table players who are seated in the DB but have no live socket.
-  // They pay blinds and are auto-acted instead of waiting for the timer.
-  const disconnectedSeats = new Map<string, Set<string>>()  // tableId → Set<userId>
+  // Players seated in the DB but with no live socket right now — for ANY
+  // table type. They keep their seat and blinds/turns until they click Leave
+  // Table (or go broke / get kicked); a disconnect alone never frees a seat.
+  const disconnectedSeats = new DisconnectedSeatTracker()
 
   function clearTurnTimer(tableId: string): void {
     const t = turnTimers.get(tableId)
@@ -380,50 +395,12 @@ nextApp.prepare().then(() => {
     turnTimers.set(tableId, t)
   }
 
-  // If the next actor is a disconnected timer-table player, auto-acts them
-  // immediately (CHECK if free, else FOLD) and chains through consecutive
-  // disconnected players.  Connected players get the normal turn timer.
+  // Starts the turn timer for the next actor. Offline (disconnected) players
+  // get the SAME countdown as connected ones — a seat being offline changes
+  // nothing about turn timing, only that nobody will click before it expires.
+  // The timeout callback in startTurnTimer() auto-CHECKs/FOLDs either way.
   async function handleTurnStart(tableId: string, playerId: string): Promise<void> {
-    const tableDisconnected = disconnectedSeats.get(tableId)
-    if (!tableDisconnected?.has(playerId)) {
-      startTurnTimer(tableId, playerId)
-      return
-    }
-
-    let result = gm.processAction(tableId, playerId, 'CHECK')
-    let autoAction: BettingAction = 'CHECK'
-    if ('error' in result) {
-      result = gm.processAction(tableId, playerId, 'FOLD')
-      autoAction = 'FOLD'
-      if ('error' in result) return
-    }
-
-    console.log(`[game] disconnected auto-${autoAction}  table=${tableId} user=${playerId}`)
-    io.to(`table:${tableId}`).emit('action_result', {
-      tableId, playerId, action: autoAction, amount: 0,
-    })
-
-    if (result.handEnded) {
-      await handleHandEnd(tableId, result.data)
-      return
-    }
-
-    if ('runout' in result && result.runout) {
-      const allHoleCards = gm.getAllHoleCards(tableId)
-      io.to(`table:${tableId}`).emit('runout_cards_revealed', { tableId, players: allHoleCards })
-      const runoutState = await buildTableState(supabase, tableId)
-      if (runoutState) io.to(`table:${tableId}`).emit('table_state', runoutState)
-      handleAllInRunout(tableId)
-      return
-    }
-
-    const state = await buildTableState(supabase, tableId)
-    if (state) io.to(`table:${tableId}`).emit('table_state', state)
-
-    const next = gm.getPublicHandState(tableId)
-    if (next?.currentTurnPlayerId) {
-      await handleTurnStart(tableId, next.currentTurnPlayerId)
-    }
+    startTurnTimer(tableId, playerId)
   }
 
   // ── All-in runout: deal remaining streets with 2s delays ──────────────────
@@ -533,7 +510,48 @@ nextApp.prepare().then(() => {
         ))
         console.log(`[game] kicked broke players: ${brokePlayers.map(p => p.username).join(', ')}  table=${tableId}`)
         for (const p of brokePlayers) {
-          disconnectedSeats.get(tableId)?.delete(p.playerId)
+          disconnectedSeats.clear(tableId, p.playerId)
+        }
+      }
+    }
+
+    // Last Hands (cash tables only): tick the countdown down now that this
+    // hand has FULLY ended — never mid-hand. The DB row is read fresh here
+    // (source of truth, not the in-memory cache) so this is correct even
+    // right after a server restart. Reaching 0 closes the table using the
+    // same status update the admin "Close Table" action uses, done here
+    // (before buildTableState below) so the very next table_state broadcast
+    // already reflects status: 'closed'.
+    let lastHandsClosedTable = false
+    if (!isSitGo) {
+      const { data: lastHandsRow } = await supabase
+        .from('poker_tables')
+        .select('last_hands_active, last_hands_remaining')
+        .eq('id', tableId)
+        .single()
+      const lh = lastHandsRow as { last_hands_active: boolean; last_hands_remaining: number | null } | null
+
+      if (lh?.last_hands_active && lh.last_hands_remaining != null) {
+        const remaining = Math.max(0, lh.last_hands_remaining - 1)
+        if (remaining > 0) {
+          await supabase
+            .from('poker_tables')
+            .update({ last_hands_remaining: remaining })
+            .eq('id', tableId)
+          lhm.setRemaining(tableId, remaining)
+          emitLastHandsAnnouncement(tableId, `${remaining} hands remaining`)
+          emitLastHandsUpdate(tableId)
+        } else {
+          await supabase
+            .from('poker_tables')
+            .update({ status: 'closed', last_hands_active: false, last_hands_remaining: 0 })
+            .eq('id', tableId)
+            .neq('status', 'closed')
+          lhm.end(tableId)
+          lastHandsClosedTable = true
+          console.log(`[last-hands] table closed after final hand  table=${tableId}`)
+          emitLastHandsAnnouncement(tableId, 'Last hands complete — table closed')
+          emitLastHandsUpdate(tableId)
         }
       }
     }
@@ -557,7 +575,9 @@ nextApp.prepare().then(() => {
       }
     }
 
-    if (!tournamentFinished) {
+    if (lastHandsClosedTable) {
+      console.log(`[last-hands] no further hands — table closed  table=${tableId}`)
+    } else if (!tournamentFinished) {
       scheduleAutoStart(tableId)
     } else {
       console.log(`[sitgo] no further hands — tournament finished  table=${tableId}`)
@@ -592,6 +612,17 @@ nextApp.prepare().then(() => {
     const payload = bm.toPayload(tableId)
     io.to(`table:${tableId}`).emit('break_update', payload)
     io.to('admin_room').emit('break_update', payload)
+  }
+
+  // ── Last Hands (admin countdown to auto-close a cash table) ───────────────
+  function emitLastHandsUpdate(tableId: string): void {
+    const payload = lhm.toPayload(tableId)
+    io.to(`table:${tableId}`).emit('last_hands_update', payload)
+    io.to('admin_room').emit('last_hands_update', payload)
+  }
+
+  function emitLastHandsAnnouncement(tableId: string, message: string): void {
+    io.to(`table:${tableId}`).emit('last_hands_announcement', { tableId, message })
   }
 
   function startBreakFlow(tableId: string): boolean {
@@ -672,40 +703,35 @@ nextApp.prepare().then(() => {
 
     const allSeatedRows = (playersData as Array<{ player_id: string; seat_number: number }> | null) ?? []
 
-    let rows: typeof allSeatedRows
+    // Deal in everyone currently connected PLUS everyone known to be merely
+    // offline right now (disconnectedSeats) — same rule for every table type.
+    // A seat only drops out of the deal if it's a true ghost: no live socket
+    // AND this server process never even saw it disconnect, meaning the row
+    // is left over from before this process started (crash/restart). Those
+    // still get dealt out here; a normal offline player never does — they
+    // stay seated and get auto-checked/folded via the normal turn timer.
+    const preHandSockets = await io.in(`table:${tableId}`).fetchSockets()
+    const connectedUserIds = new Set(preHandSockets.map(s => s.data.userId))
+    const reservedUserIds = disconnectedSeats.getReserved(tableId)
 
-    if (table_type === 'open' || !sm.isActive(tableId)) {
-      // Open tables: always filter to connected players only.
-      // Timer tables with no active session (first hand or after server restart):
-      // also filter — ghost seats from a dead session must not be dealt in.
-      // Once a session is running, timer tables keep ALL seated players (even
-      // disconnected ones — they are auto-acted via handleTurnStart).
-      const preHandSockets = await io.in(`table:${tableId}`).fetchSockets()
-      const connectedUserIds = new Set(preHandSockets.map(s => s.data.userId))
+    const { keep, stale: staleRows } = partitionByConnection(allSeatedRows, connectedUserIds, reservedUserIds)
+    let rows = keep
 
-      const staleRows = allSeatedRows.filter(r => !connectedUserIds.has(r.player_id))
-      rows = allSeatedRows.filter(r => connectedUserIds.has(r.player_id))
-
-      if (staleRows.length > 0) {
-        console.log(`[game] removing stale seats before hand  table=${tableId} count=${staleRows.length} type=${table_type}`)
-        await Promise.all(staleRows.map(r =>
-          supabase
-            .from('table_players')
-            .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
-            .eq('table_id', tableId)
-            .eq('player_id', r.player_id)
-            .neq('status', 'left')
-        ))
-        if (rows.length < 2) {
-          const updatedState = await buildTableState(supabase, tableId)
-          if (updatedState) io.to(`table:${tableId}`).emit('table_state', updatedState)
-          return 'too_few'
-        }
+    if (staleRows.length > 0) {
+      console.log(`[game] removing ghost seats before hand  table=${tableId} count=${staleRows.length} type=${table_type}`)
+      await Promise.all(staleRows.map(r =>
+        supabase
+          .from('table_players')
+          .update({ status: 'left', seat_number: null, left_at: new Date().toISOString() })
+          .eq('table_id', tableId)
+          .eq('player_id', r.player_id)
+          .neq('status', 'left')
+      ))
+      if (rows.length < 2) {
+        const updatedState = await buildTableState(supabase, tableId)
+        if (updatedState) io.to(`table:${tableId}`).emit('table_state', updatedState)
+        return 'too_few'
       }
-    } else {
-      // Active timer-table session: include all seated players regardless of connection.
-      // Disconnected players will be auto-acted via handleTurnStart.
-      rows = allSeatedRows
     }
 
     if (rows.length < 2) return 'too_few'
@@ -848,7 +874,12 @@ nextApp.prepare().then(() => {
   }
 
   // ── Stale-seat cleanup ────────────────────────────────────────────────────
-  // Marks seated rows as left for any player with no live socket in the table room.
+  // Marks seated rows as left ONLY when they are true ghosts: no live socket
+  // AND never seen disconnecting by this server process (disconnectedSeats
+  // tracks every disconnect for the process's whole lifetime — see the
+  // 'disconnect' handler below). That distinguishes a genuinely abandoned row
+  // left behind by a crash/restart (this process never saw them at all) from
+  // a player who is simply offline right now and still holds their seat.
   // Called before join, so ghost players from a previous server run are evicted
   // before they can affect state.
   //
@@ -867,9 +898,9 @@ nextApp.prepare().then(() => {
     const connectedUserIds = new Set(roomSockets.map(s => s.data.userId))
     if (requestingUserId) connectedUserIds.add(requestingUserId)
 
-    const activeHandPlayerIds = new Set(
-      (gm.getPublicHandState(tableId)?.players ?? []).map(p => p.playerId)
-    )
+    const activeHandPlayerIds = gm.getPublicHandState(tableId)?.players.map(p => p.playerId) ?? []
+    const reservedUserIds = disconnectedSeats.getReserved(tableId)
+    for (const id of activeHandPlayerIds) reservedUserIds.add(id)
 
     const { data: seatedRows } = await supabase
       .from('table_players')
@@ -877,13 +908,15 @@ nextApp.prepare().then(() => {
       .eq('table_id', tableId)
       .eq('status', 'seated')
 
-    const stale = (
-      (seatedRows as Array<{ id: string; player_id: string; seat_number: number | null }> | null) ?? []
-    ).filter(r => !connectedUserIds.has(r.player_id) && !activeHandPlayerIds.has(r.player_id))
+    const { stale } = partitionByConnection(
+      (seatedRows as Array<{ id: string; player_id: string; seat_number: number | null }> | null) ?? [],
+      connectedUserIds,
+      reservedUserIds,
+    )
 
     if (stale.length === 0) return
 
-    console.log(`[cleanup] removing ${stale.length} stale seats (no live socket)  table=${tableId}  players=${stale.map(r => r.player_id).join(',')}`)
+    console.log(`[cleanup] removing ${stale.length} ghost seats (no live socket, never seen by this process)  table=${tableId}  players=${stale.map(r => r.player_id).join(',')}`)
     await Promise.all(stale.map(r =>
       supabase
         .from('table_players')
@@ -928,7 +961,7 @@ nextApp.prepare().then(() => {
   io.on('connection', (socket) => {
     const { userId, username } = socket.data
 
-    console.log(`[socket] connected  user=${username} socket=${socket.id}`)
+    console.log(`[socket] connected  user=${username} role=${socket.data.role} socket=${socket.id}`)
 
     socket.emit('socket_ready', { userId, username })
 
@@ -945,6 +978,9 @@ nextApp.prepare().then(() => {
       }
       for (const brk of bm.getAllBreaks()) {
         socket.emit('break_update', bm.toPayload(brk.tableId))
+      }
+      for (const lh of lhm.getAllActive()) {
+        socket.emit('last_hands_update', lhm.toPayload(lh.tableId))
       }
     }
 
@@ -966,7 +1002,7 @@ nextApp.prepare().then(() => {
       socket.data.joinedTables.add(tableId)
       socket.data.seatedAtTables.add(tableId)
       socket.join(`table:${tableId}`)
-      disconnectedSeats.get(tableId)?.delete(userId)
+      disconnectedSeats.clear(tableId, userId)
 
       socket.emit('table_joined', { tableId, seatNumber: result.seatNumber })
 
@@ -1003,6 +1039,11 @@ nextApp.prepare().then(() => {
 
       // Reconnect: resend current break state (phase:null when no break is running).
       socket.emit('break_update', bm.toPayload(tableId))
+
+      // Reconnect: resend current Last Hands state straight from the DB-backed
+      // `state` fetched above (poker_tables is the source of truth), not the
+      // in-memory cache, so reconnecting players always see the persisted value.
+      socket.emit('last_hands_update', { tableId, remaining: state?.lastHandsRemaining ?? null })
     })
 
     // ── spectate_table ─────────────────────────────────────────────────────
@@ -1023,6 +1064,8 @@ nextApp.prepare().then(() => {
       if (state) io.to(`table:${tableId}`).emit('table_state', state)
 
       socket.emit('break_update', bm.toPayload(tableId))
+      // Reconnect: same DB-backed value as join_table, not the in-memory cache.
+      socket.emit('last_hands_update', { tableId, remaining: state?.lastHandsRemaining ?? null })
     })
 
     // ── leave_table ────────────────────────────────────────────────────────
@@ -1227,6 +1270,159 @@ nextApp.prepare().then(() => {
       console.log(`[break] scheduled  table=${tableId} by=${username}`)
     })
 
+    // ── start_last_hands ───────────────────────────────────────────────────
+    socket.on('start_last_hands', async ({ tableId, count }, callback) => {
+      console.log(`[last-hands] start_last_hands received  table=${tableId} count=${count} user=${username} role=${socket.data.role} socket=${socket.id}`)
+
+      if (socket.data.role !== 'admin' && socket.data.role !== 'super_admin') {
+        console.log(`[last-hands] rejected — not admin  user=${username} role=${socket.data.role}`)
+        socket.emit('socket_error', { message: 'Admin only' })
+        callback?.({ ok: false, error: 'Admin only' })
+        return
+      }
+      if (!Number.isInteger(count) || count <= 0) {
+        console.log(`[last-hands] rejected — invalid count=${count}  table=${tableId}`)
+        socket.emit('socket_error', { message: 'Invalid hand count' })
+        callback?.({ ok: false, error: 'Invalid hand count' })
+        return
+      }
+
+      const { data: tableRow, error: fetchError } = await supabase
+        .from('poker_tables')
+        .select('game_mode, status, last_hands_active')
+        .eq('id', tableId)
+        .single()
+
+      if (fetchError) {
+        console.error(`[last-hands] table fetch failed  table=${tableId}`, fetchError)
+        socket.emit('socket_error', { message: 'Failed to look up table' })
+        callback?.({ ok: false, error: `Failed to look up table: ${fetchError.message}` })
+        return
+      }
+
+      const table = tableRow as { game_mode: string; status: string; last_hands_active: boolean } | null
+      if (!table || table.status === 'closed') {
+        console.log(`[last-hands] rejected — table not found or closed  table=${tableId}`)
+        socket.emit('socket_error', { message: 'Table not found or already closed' })
+        callback?.({ ok: false, error: 'Table not found or already closed' })
+        return
+      }
+      if (table.game_mode !== 'cash') {
+        console.log(`[last-hands] rejected — not a cash table  table=${tableId} game_mode=${table.game_mode}`)
+        socket.emit('socket_error', { message: 'Last Hands is only available for cash tables' })
+        callback?.({ ok: false, error: 'Last Hands is only available for cash tables' })
+        return
+      }
+      if (table.last_hands_active) {
+        console.log(`[last-hands] rejected — already active  table=${tableId}`)
+        socket.emit('socket_error', { message: 'Last Hands is already active for this table' })
+        callback?.({ ok: false, error: 'Last Hands is already active for this table' })
+        return
+      }
+
+      // Guard on last_hands_active: false so a concurrent double-click can't
+      // start it twice — only the write that actually flips the flag wins.
+      const { data: updatedRows, error: updateError } = await supabase
+        .from('poker_tables')
+        .update({
+          last_hands_active: true,
+          last_hands_remaining: count,
+          last_hands_started_at: new Date().toISOString(),
+          last_hands_started_by: userId,
+        })
+        .eq('id', tableId)
+        .eq('last_hands_active', false)
+        .select('id')
+
+      if (updateError) {
+        console.error(`[last-hands] DB update failed  table=${tableId}`, updateError)
+        socket.emit('socket_error', { message: 'Failed to start Last Hands' })
+        callback?.({ ok: false, error: `DB update failed: ${updateError.message}` })
+        return
+      }
+
+      if (!((updatedRows as unknown[] | null)?.length)) {
+        console.log(`[last-hands] update affected 0 rows — lost a race  table=${tableId}`)
+        socket.emit('socket_error', { message: 'Last Hands is already active for this table' })
+        callback?.({ ok: false, error: 'Last Hands is already active for this table' })
+        return
+      }
+
+      lhm.setRemaining(tableId, count)
+      console.log(`[last-hands] started  table=${tableId} count=${count} by=${username}`)
+      emitLastHandsAnnouncement(tableId, `Last ${count} hands announced`)
+      emitLastHandsUpdate(tableId)
+
+      const state = await buildTableState(supabase, tableId)
+      if (state) io.to(`table:${tableId}`).emit('table_state', state)
+
+      callback?.({ ok: true })
+    })
+
+    // ── add_last_hands ─────────────────────────────────────────────────────
+    socket.on('add_last_hands', async ({ tableId, additional }, callback) => {
+      console.log(`[last-hands] add_last_hands received  table=${tableId} additional=${additional} user=${username} role=${socket.data.role} socket=${socket.id}`)
+
+      if (socket.data.role !== 'admin' && socket.data.role !== 'super_admin') {
+        console.log(`[last-hands] rejected — not admin  user=${username} role=${socket.data.role}`)
+        socket.emit('socket_error', { message: 'Admin only' })
+        callback?.({ ok: false, error: 'Admin only' })
+        return
+      }
+      if (!Number.isInteger(additional) || additional <= 0) {
+        console.log(`[last-hands] rejected — invalid additional=${additional}  table=${tableId}`)
+        socket.emit('socket_error', { message: 'Invalid hand count' })
+        callback?.({ ok: false, error: 'Invalid hand count' })
+        return
+      }
+
+      const { data: tableRow, error: fetchError } = await supabase
+        .from('poker_tables')
+        .select('last_hands_active, last_hands_remaining')
+        .eq('id', tableId)
+        .single()
+
+      if (fetchError) {
+        console.error(`[last-hands] table fetch failed  table=${tableId}`, fetchError)
+        socket.emit('socket_error', { message: 'Failed to look up table' })
+        callback?.({ ok: false, error: `Failed to look up table: ${fetchError.message}` })
+        return
+      }
+
+      const table = tableRow as { last_hands_active: boolean; last_hands_remaining: number | null } | null
+      if (!table?.last_hands_active || table.last_hands_remaining == null) {
+        console.log(`[last-hands] rejected — not active  table=${tableId}`)
+        socket.emit('socket_error', { message: 'Last Hands is not active for this table' })
+        callback?.({ ok: false, error: 'Last Hands is not active for this table' })
+        return
+      }
+
+      const newRemaining = table.last_hands_remaining + additional
+      const { error: updateError } = await supabase
+        .from('poker_tables')
+        .update({ last_hands_remaining: newRemaining })
+        .eq('id', tableId)
+        .eq('last_hands_active', true)
+
+      if (updateError) {
+        console.error(`[last-hands] DB update failed  table=${tableId}`, updateError)
+        socket.emit('socket_error', { message: 'Failed to add hands' })
+        callback?.({ ok: false, error: `DB update failed: ${updateError.message}` })
+        return
+      }
+
+      lhm.setRemaining(tableId, newRemaining)
+      console.log(`[last-hands] +${additional}  table=${tableId} remaining=${newRemaining} by=${username}`)
+      emitLastHandsAnnouncement(tableId, `Admin added ${additional} more hands`)
+      emitLastHandsAnnouncement(tableId, `${newRemaining} hands remaining`)
+      emitLastHandsUpdate(tableId)
+
+      const state = await buildTableState(supabase, tableId)
+      if (state) io.to(`table:${tableId}`).emit('table_state', state)
+
+      callback?.({ ok: true })
+    })
+
     // ── kick_player ────────────────────────────────────────────────────────
     socket.on('kick_player', async ({ tableId, playerId }) => {
       if (socket.data.role !== 'admin') {
@@ -1251,7 +1447,7 @@ nextApp.prepare().then(() => {
         }
       }
       await leaveTable(supabase, tableId, playerId)
-      disconnectedSeats.get(tableId)?.delete(playerId)
+      disconnectedSeats.clear(tableId, playerId)
       // Notify and eject the kicked player's sockets.
       const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
       for (const s of roomSockets) {
@@ -1272,28 +1468,32 @@ nextApp.prepare().then(() => {
       console.log(`[socket] disconnected  user=${username} socket=${socket.id}`)
 
       for (const tableId of socket.data.joinedTables) {
-        // An active break locks seats in the same way a locked session does —
-        // players must stay seated for the duration of the break.
-        const seatLocked = sm.lockLeaving(tableId) || bm.isActive(tableId)
-
-        if (seatLocked && socket.data.seatedAtTables.has(tableId)) {
-          // Timer table with an active session (or an active break): keep the seat reserved.
+        if (socket.data.seatedAtTables.has(tableId)) {
+          // A seat is released ONLY by leave_table (or going broke / an admin
+          // kick / Sit & Go elimination) — never by a disconnect. Phone lock,
+          // app switch, refresh, or a dropped connection must never empty a
+          // seat, on any table type. Just mark them offline; their turn still
+          // gets the normal countdown timer and auto-checks/folds on timeout,
+          // and the seat is restored automatically on reconnect.
           // Only flag as disconnected if this was their last socket in the room
           // (the socket has already left all rooms before 'disconnect' fires).
           const remainingSockets = await io.in(`table:${tableId}`).fetchSockets()
           const stillConnected = remainingSockets.some(s => s.data.userId === userId)
           if (!stillConnected) {
-            if (!disconnectedSeats.has(tableId)) disconnectedSeats.set(tableId, new Set())
-            disconnectedSeats.get(tableId)!.add(userId)
+            disconnectedSeats.markDisconnected(tableId, userId)
             console.log(`[socket] seat reserved for disconnected player  user=${username} table=${tableId}`)
           }
-        } else if (!gm.hasActiveHand(tableId) && !seatLocked) {
-          // Open table (or timer table with no session/break): release the seat.
-          await leaveTable(supabase, tableId, userId)
+          continue
         }
 
-        const state = await buildTableState(supabase, tableId)
-        if (state) io.to(`table:${tableId}`).emit('table_state', state)
+        // Spectator (not seated): no seat to protect, release their spot once
+        // no hand-lock applies — same as before.
+        const seatLocked = sm.lockLeaving(tableId) || bm.isActive(tableId)
+        if (!gm.hasActiveHand(tableId) && !seatLocked) {
+          await leaveTable(supabase, tableId, userId)
+          const state = await buildTableState(supabase, tableId)
+          if (state) io.to(`table:${tableId}`).emit('table_state', state)
+        }
       }
     })
   })

@@ -14,10 +14,12 @@ import type {
   SeatInfo,
   ChatMessage,
   BreakStatePayload,
+  LastHandsStatePayload,
   ReactionType,
 } from '@/lib/socket/types'
 import { getSocket } from '@/lib/socket/client'
 import type { AppSocket } from '@/lib/socket/client'
+import { didNewHandStart } from '@/lib/socket/hand-transition'
 import { soundManager } from '@/lib/sounds'
 import type { SoundName } from '@/lib/sounds'
 
@@ -49,6 +51,8 @@ type BreakDisplayInfo = {
 
 type LastAction = { action: BettingAction; amount?: number }
 type PreAction  = 'auto-check' | 'check-fold' | 'auto-fold'
+
+type LastHandsToast = { id: number; message: string }
 
 const CHAT_MAX_LEN = 200
 const CHAT_HISTORY_LIMIT = 50
@@ -1114,6 +1118,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [breakCountdownDisplay, setBreakCountdownDisplay] = useState<number>(0)
   const [breakDurationDisplay, setBreakDurationDisplay] = useState<number>(0)
   const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' } | null>(null)
+  const [lastHandsRemaining, setLastHandsRemaining] = useState<number | null>(null)
+  const [lastHandsToasts, setLastHandsToasts] = useState<LastHandsToast[]>([])
   const [muted, setMuted]                = useState(false)
   const [myCurrentStatus, setMyCurrentStatus] = useState<'seated' | 'spectating'>(myStatus)
   const [outOfChipsMsg, setOutOfChipsMsg] = useState(false)
@@ -1275,6 +1281,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     top: number
   } | null>(null)
   const reactionFlightIdRef = useRef(0)
+  const lastHandsToastIdRef = useRef(0)
   const tableInnerRef = useRef<HTMLDivElement>(null)
   const removeReactionFlight = (id: string) => setReactionFlights(prev => prev.filter(f => f.id !== id))
 
@@ -1597,11 +1604,17 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
         // Animate opponent card backs when a new hand starts
         if (p.handState) {
-          // Detect new hand by handNumber; reset seat animation so every deal animates
-          if (p.handState.handNumber !== prevHandNumberRef.current) {
+          // Detect new hand by handNumber via table_state — broadcast to
+          // EVERY socket in the room (seated, spectating, excluded from this
+          // hand, or reconnecting), unlike deal_cards which only reaches
+          // players actually dealt in. Reset seat animation and clear
+          // per-hand-only "last action" labels (Folded/Called/etc.) so no
+          // one carries a stale label over from the previous hand.
+          if (didNewHandStart(prevHandNumberRef.current, p.handState.handNumber)) {
             prevHandNumberRef.current = p.handState.handNumber
             seatAnimTimersRef.current.forEach(clearTimeout); seatAnimTimersRef.current = []
             setDealtSeatNumbers(new Set())
+            setLastActions({})
           }
 
           const opponentSeats = p.handState.players
@@ -1766,6 +1779,20 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         setBreakInfo(info)
       }
 
+      const onLastHandsUpdate = (p: LastHandsStatePayload) => {
+        if (!active || p.tableId !== initialState.tableId) return
+        setLastHandsRemaining(p.remaining)
+      }
+
+      const onLastHandsAnnouncement = (p: { tableId: string; message: string }) => {
+        if (!active || p.tableId !== initialState.tableId) return
+        const id = lastHandsToastIdRef.current++
+        setLastHandsToasts(prev => [...prev, { id, message: p.message }])
+        setTimeout(() => {
+          if (active) setLastHandsToasts(prev => prev.filter(t => t.id !== id))
+        }, 4000)
+      }
+
       const onKickedFromTable = (p: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => {
         if (!active || p.tableId !== initialState.tableId) return
         const msg = p.reason === 'out_of_chips'
@@ -1829,6 +1856,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('hand_revealed', onHandRevealed)
       socket.on('session_update', onSessionUpdate)
       socket.on('break_update', onBreakUpdate)
+      socket.on('last_hands_update', onLastHandsUpdate)
+      socket.on('last_hands_announcement', onLastHandsAnnouncement)
       socket.on('kicked_from_table', onKickedFromTable)
       socket.on('table_chat_message', onChatMessage)
       socket.on('reaction_sent', onReactionSent)
@@ -1846,6 +1875,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('turn_timer_start', onTurnTimerStart); socket.off('next_hand_countdown', onNextHandCountdown)
         socket.off('runout_cards_revealed', onRunoutCardsRevealed); socket.off('hand_revealed', onHandRevealed)
         socket.off('session_update', onSessionUpdate); socket.off('break_update', onBreakUpdate)
+        socket.off('last_hands_update', onLastHandsUpdate); socket.off('last_hands_announcement', onLastHandsAnnouncement)
         socket.off('kicked_from_table', onKickedFromTable)
         socket.off('table_chat_message', onChatMessage)
         socket.off('reaction_sent', onReactionSent)
@@ -2164,6 +2194,27 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         <WinnerToast showdown={showdownResult} onDismiss={() => setWinnerToastVisible(false)} />
       )}
 
+      {/* ── Last Hands toasts — stacked above the winner toast, auto-hide after 4s ── */}
+      {lastHandsToasts.length > 0 && (
+        <div style={{
+          position: 'fixed', top: 14, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 401, pointerEvents: 'none',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+        }}>
+          {lastHandsToasts.map(t => (
+            <div key={t.id} style={{
+              background: 'rgba(4,10,22,0.93)', border: '1px solid rgba(96,165,250,0.5)',
+              borderRadius: 20, padding: '6px 14px', whiteSpace: 'nowrap',
+              color: '#93c5fd', fontSize: 12, fontWeight: 700,
+              boxShadow: '0 8px 24px rgba(0,0,0,0.6)', backdropFilter: 'blur(14px)',
+              animation: 'winner-toast-in 0.32s cubic-bezier(.22,.61,.36,1)',
+            }}>
+              🏁 {t.message}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* ── Socket error toast ──────────────────────────────────────────────── */}
       {socketError && (
         <div
@@ -2265,6 +2316,16 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               {breakInfo.phase === 'countdown' && `⏸ Break starts in ${breakCountdownDisplay}s`}
               {breakInfo.phase === 'awaiting_hand_end' && '⏸ Break will start after this hand'}
               {breakInfo.phase === 'active' && `⏸ Break time — ${formatSessionTime(breakDurationDisplay)}`}
+            </span>
+          )}
+          {/* Last Hands badge */}
+          {lastHandsRemaining != null && (
+            <span className="tbl-hide-mobile" title="Hands remaining before this table closes" style={{
+              background: 'rgba(96,165,250,0.12)', border: '1px solid rgba(96,165,250,0.35)',
+              borderRadius: 5, padding: '2px 8px', color: '#93c5fd',
+              fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', fontFamily: 'monospace',
+            }}>
+              🏁 Last hands: {lastHandsRemaining}
             </span>
           )}
           <button

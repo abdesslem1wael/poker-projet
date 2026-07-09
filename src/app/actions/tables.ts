@@ -111,7 +111,10 @@ export async function closeTableAction(
   const adminClient = createAdminClient()
   await adminClient
     .from('poker_tables')
-    .update({ status: 'closed' })
+    // Clear any in-progress Last Hands countdown too — otherwise a stale
+    // countdown could resurrect after a reopen or a server restart (the
+    // in-memory cache is hydrated straight from these columns on boot).
+    .update({ status: 'closed', last_hands_active: false, last_hands_remaining: null })
     .eq('id', tableId)
     .neq('status', 'closed')
 

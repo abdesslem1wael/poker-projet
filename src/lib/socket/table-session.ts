@@ -21,6 +21,8 @@ type TableRow = {
   prize_pool: number | null
   sit_go_status: 'registering' | 'ready' | 'running' | 'finished' | null
   blind_level: number
+  last_hands_active: boolean
+  last_hands_remaining: number | null
 }
 
 type PlayerRow = {
@@ -39,7 +41,7 @@ export async function getTableState(
 ): Promise<TableStatePayload | null> {
   const { data: tableData } = await supabase
     .from('poker_tables')
-    .select('id, name, small_blind, big_blind, max_players, table_type, status, game_mode, prize_pool, sit_go_status, blind_level')
+    .select('id, name, small_blind, big_blind, max_players, table_type, status, game_mode, prize_pool, sit_go_status, blind_level, last_hands_active, last_hands_remaining')
     .eq('id', tableId)
     .single()
 
@@ -122,6 +124,10 @@ export async function getTableState(
     prizePool: table.prize_pool,
     sitGoStatus: table.sit_go_status,
     blindLevel: table.game_mode === 'sit_go' ? table.blind_level : null,
+    // The DB row is the source of truth for Last Hands — this is what
+    // reconnecting/joining sockets receive via table_state, independent of
+    // the server's in-memory LastHandsManager cache.
+    lastHandsRemaining: table.last_hands_active ? table.last_hands_remaining : null,
   }
 }
 

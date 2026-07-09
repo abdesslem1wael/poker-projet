@@ -263,6 +263,36 @@ describe('getTableState', () => {
     expect(occupiedSeats[0].playerId).toBe('real')
   })
 
+  it('lastHandsRemaining is null when Last Hands was never started', async () => {
+    const db = new MockDB()
+    db.seedTable({ id: TABLE, name: 'Test', small_blind: 5, big_blind: 10, max_players: 6, table_type: 'open', status: 'active' })
+
+    const state = await getTableState(db as never, TABLE)
+    expect(state!.lastHandsRemaining).toBeNull()
+  })
+
+  it('lastHandsRemaining reflects the persisted DB value while Last Hands is active — this is what a reconnecting player receives', async () => {
+    const db = new MockDB()
+    db.seedTable({
+      id: TABLE, name: 'Test', small_blind: 5, big_blind: 10, max_players: 6, table_type: 'open', status: 'active',
+      last_hands_active: true, last_hands_remaining: 7,
+    })
+
+    const state = await getTableState(db as never, TABLE)
+    expect(state!.lastHandsRemaining).toBe(7)
+  })
+
+  it('lastHandsRemaining is null once last_hands_active is false again, even if a stale count lingers', async () => {
+    const db = new MockDB()
+    db.seedTable({
+      id: TABLE, name: 'Test', small_blind: 5, big_blind: 10, max_players: 6, table_type: 'open', status: 'closed',
+      last_hands_active: false, last_hands_remaining: 0,
+    })
+
+    const state = await getTableState(db as never, TABLE)
+    expect(state!.lastHandsRemaining).toBeNull()
+  })
+
   it('after cleanupTableSeats, duplicate player rows produce a clean state', async () => {
     const db = new MockDB()
     db.seedTable({ id: TABLE, name: 'Test', small_blind: 5, big_blind: 10, max_players: 6, table_type: 'open', status: 'waiting' })

@@ -12,6 +12,7 @@ type TableRow = {
   small_blind: number
   big_blind: number
   status: 'waiting' | 'active' | 'closed'
+  game_mode: 'cash' | 'sit_go'
 }
 
 type GameHistoryRow = {
@@ -43,7 +44,7 @@ async function fetchDashboardData() {
   const [tablesRes, historyRes, dealerTipsRes] = await Promise.all([
     adminClient
       .from('poker_tables')
-      .select('id, name, small_blind, big_blind, status')
+      .select('id, name, small_blind, big_blind, status, game_mode')
       .order('created_at', { ascending: false }),
     adminClient.from('game_history').select('table_id, result_json'),
     adminClient
@@ -61,6 +62,7 @@ async function fetchDashboardData() {
       small_blind: t.small_blind,
       big_blind: t.big_blind,
       status: t.status as 'waiting' | 'active',
+      game_mode: t.game_mode,
     }))
 
   const autoTipsMap = new Map<string, number>()
