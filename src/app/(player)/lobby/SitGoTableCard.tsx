@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition } from 'react'
+import { useEffect, useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { registerSitGoAction, unregisterSitGoAction } from '@/app/actions/sitgo'
 import { getSocket } from '@/lib/socket/client'
@@ -133,6 +133,29 @@ export default function SitGoTableCard({
         .catch((err: Error) => { setShowJoinScreen(false); setEntering(null); setError(err.message) })
     })
   }
+
+  // Sit & Go auto-start: the server only emits this to registered players'
+  // sockets, the instant the table fills up and everyone is auto-seated —
+  // no "Enter Table" click required. Reuses the same join+navigate flow as
+  // the manual button so a missed event (e.g. this card unmounted mid-fill)
+  // still leaves "Enter Table"/"Rejoin" as a working fallback.
+  useEffect(() => {
+    let active = true
+    let cleanup: (() => void) | null = null
+
+    getSocket().then((socket) => {
+      if (!active) return
+      const onTableReady = ({ tableId: tid }: { tableId: string }) => {
+        if (tid !== table.id || entering !== null) return
+        handleEnter()
+      }
+      socket.on('sit_go_table_ready', onTableReady)
+      cleanup = () => socket.off('sit_go_table_ready', onTableReady)
+    })
+
+    return () => { active = false; cleanup?.() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [table.id])
 
   function handleWatch() {
     setError(null); setEntering('watch')

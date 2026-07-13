@@ -12,6 +12,7 @@ import {
   spectateTable,
   leaveTable,
   cleanupTableSeats,
+  seatAllSitGoRegistrants,
 } from './src/lib/socket/table-session'
 import { GameManager } from './src/lib/socket/game-manager'
 import { SessionManager } from './src/lib/socket/session-manager'
@@ -873,6 +874,131 @@ nextApp.prepare().then(async () => {
     autoStartTimers.set(tableId, t)
   }
 
+  // ── Sit & Go auto-start ─────────────────────────────────────────────────────
+  // Once registration fills a Sit & Go (sit_go_status 'ready', set atomically
+  // by the register_sit_go RPC), every registered player is auto-seated and
+  // moved to the table — no "Enter Table" click required — followed by a
+  // synchronized countdown before the first hand deals itself.
+  const SIT_GO_COUNTDOWN_MS = 30_000
+  const sitGoCountdownTimers = new Map<string, NodeJS.Timeout>()
+  const sitGoCountdownStartedAt = new Map<string, number>()  // tableId → epoch ms
+
+  function startSitGoCountdown(tableId: string): void {
+    const existing = sitGoCountdownTimers.get(tableId)
+    if (existing !== undefined) { clearTimeout(existing); sitGoCountdownTimers.delete(tableId) }
+
+    const startedAt = Date.now()
+    sitGoCountdownStartedAt.set(tableId, startedAt)
+
+    io.to(`table:${tableId}`).emit('sit_go_starting_countdown', {
+      tableId, seconds: SIT_GO_COUNTDOWN_MS / 1000,
+    })
+
+    const t = setTimeout(() => {
+      sitGoCountdownTimers.delete(tableId)
+      sitGoCountdownStartedAt.delete(tableId)
+      void doStartHand(tableId).catch(err => console.error('[sitgo] auto-start crashed:', err))
+    }, SIT_GO_COUNTDOWN_MS)
+    sitGoCountdownTimers.set(tableId, t)
+  }
+
+  // Tables currently being claimed/seated in this process — the immediate
+  // trigger fired by registerSitGoAction and the 5s periodic sweep can both
+  // observe the same 'ready' table before either finishes; this skips a
+  // redundant attempt without even hitting the DB.
+  const sitGoStartInFlight = new Set<string>()
+
+  // Claims a single 'ready' Sit & Go table: flips sit_go_status to 'running'
+  // (guarded so only one caller wins the race), bulk-seats every registrant,
+  // notifies registered players' sockets to navigate to the table, and
+  // starts the pre-first-hand countdown.
+  async function startSitGoTournament(tableId: string): Promise<void> {
+    if (sitGoStartInFlight.has(tableId)) return
+    sitGoStartInFlight.add(tableId)
+    try {
+      // Claim the transition FIRST, before touching table_players. This
+      // guarded UPDATE is atomic in Postgres, so it is the actual mutual-
+      // exclusion mechanism: only the caller that flips a row here ever
+      // proceeds to seat players. Any other concurrent/duplicate caller —
+      // this process's own periodic sweep, another process after a restart,
+      // or the legacy manual-join flip in joinTable() — sees 0 affected rows
+      // and returns immediately without touching table_players at all. This
+      // is what actually prevents the double-seat race (seating used to run
+      // before this claim, so two concurrent callers could both seat the
+      // same players before either won the flip).
+      const { data: flippedRows } = await supabase
+        .from('poker_tables')
+        .update({ sit_go_status: 'running' })
+        .eq('id', tableId)
+        .eq('sit_go_status', 'ready')
+        .select('id')
+
+      if (!((flippedRows as Array<{ id: string }> | null) ?? []).length) return
+
+      console.log(`[sitgo] tournament starting  table=${tableId}`)
+
+      await seatAllSitGoRegistrants(supabase, tableId)
+
+      const { data: regRows } = await supabase
+        .from('sit_go_registrations')
+        .select('player_id')
+        .eq('table_id', tableId)
+
+      const registeredIds = new Set(
+        ((regRows as Array<{ player_id: string }> | null) ?? []).map(r => r.player_id),
+      )
+      const allSockets = await io.fetchSockets()
+      for (const s of allSockets) {
+        if (registeredIds.has(s.data.userId)) s.emit('sit_go_table_ready', { tableId })
+      }
+
+      const state = await buildTableState(supabase, tableId)
+      if (state) io.to(`table:${tableId}`).emit('table_state', state)
+
+      startSitGoCountdown(tableId)
+    } finally {
+      sitGoStartInFlight.delete(tableId)
+    }
+  }
+
+  // Sweeps for any Sit & Go table stuck at 'ready' — the normal path is the
+  // immediate trigger fired by registerSitGoAction right after the last seat
+  // registers, but this backstop (called every 5s, see below) also covers a
+  // server restart mid-registration or a missed in-process trigger.
+  async function checkSitGoReadyTables(): Promise<void> {
+    const { data } = await supabase
+      .from('poker_tables')
+      .select('id')
+      .eq('game_mode', 'sit_go')
+      .eq('sit_go_status', 'ready')
+
+    for (const row of (data as Array<{ id: string }> | null) ?? []) {
+      try {
+        await startSitGoTournament(row.id)
+      } catch (err) {
+        console.error(`[sitgo] failed to start tournament  table=${row.id}`, err)
+      }
+    }
+  }
+
+  // Exposed so Next.js Server Actions (registerSitGoAction) can nudge this
+  // check immediately after registration fills the last seat, instead of
+  // waiting for the next 5s sweep. Same process, different module graph —
+  // see src/lib/socket/io-access.ts.
+  ;(global as Record<string, unknown>).__triggerSitGoCheck = () => {
+    void checkSitGoReadyTables().catch(err => console.error('[sitgo] triggered check crashed:', err))
+  }
+
+  // Exposed so Next.js Server Actions can ask for a fresh table_state
+  // broadcast after mutating DB state directly (e.g. rebuySitGoAction) —
+  // routed through here because buildTableState() needs GameManager's
+  // in-memory hand state, which only this closure has access to.
+  ;(global as Record<string, unknown>).__triggerTableStateRefresh = (tableId: string) => {
+    void buildTableState(supabase, tableId)
+      .then(state => { if (state) io.to(`table:${tableId}`).emit('table_state', state) })
+      .catch(err => console.error(`[sitgo] table_state refresh crashed  table=${tableId}`, err))
+  }
+
   // ── Stale-seat cleanup ────────────────────────────────────────────────────
   // Marks seated rows as left ONLY when they are true ghosts: no live socket
   // AND never seen disconnecting by this server process (disconnectedSeats
@@ -1044,6 +1170,15 @@ nextApp.prepare().then(async () => {
       // `state` fetched above (poker_tables is the source of truth), not the
       // in-memory cache, so reconnecting players always see the persisted value.
       socket.emit('last_hands_update', { tableId, remaining: state?.lastHandsRemaining ?? null })
+
+      // Reconnect: resend the Sit & Go pre-first-hand countdown with accurate
+      // remaining seconds, same math as the turn timer resend above.
+      const sitGoStart = sitGoCountdownStartedAt.get(tableId)
+      if (sitGoStart !== undefined) {
+        const elapsed = Date.now() - sitGoStart
+        const remaining = Math.max(1, Math.ceil((SIT_GO_COUNTDOWN_MS - elapsed) / 1000))
+        socket.emit('sit_go_starting_countdown', { tableId, seconds: remaining })
+      }
     })
 
     // ── spectate_table ─────────────────────────────────────────────────────
@@ -1063,6 +1198,13 @@ nextApp.prepare().then(async () => {
       const state = await buildTableState(supabase, tableId)
       if (state) io.to(`table:${tableId}`).emit('table_state', state)
 
+      const sitGoStart = sitGoCountdownStartedAt.get(tableId)
+      if (sitGoStart !== undefined) {
+        const elapsed = Date.now() - sitGoStart
+        const remaining = Math.max(1, Math.ceil((SIT_GO_COUNTDOWN_MS - elapsed) / 1000))
+        socket.emit('sit_go_starting_countdown', { tableId, seconds: remaining })
+      }
+
       socket.emit('break_update', bm.toPayload(tableId))
       // Reconnect: same DB-backed value as join_table, not the in-memory cache.
       socket.emit('last_hands_update', { tableId, remaining: state?.lastHandsRemaining ?? null })
@@ -1070,14 +1212,27 @@ nextApp.prepare().then(async () => {
 
     // ── leave_table ────────────────────────────────────────────────────────
     socket.on('leave_table', async ({ tableId }) => {
+      // A Sit & Go player already eliminated from the tournament isn't part
+      // of active/locked gameplay anymore, so the session/break locks below
+      // (which exist to keep active players seated) don't apply to them —
+      // they must always be able to leave for the lobby.
+      const { data: eliminatedRow } = await supabase
+        .from('sit_go_registrations')
+        .select('id')
+        .eq('table_id', tableId)
+        .eq('player_id', userId)
+        .eq('status', 'eliminated')
+        .maybeSingle()
+      const isEliminatedSitGoPlayer = eliminatedRow != null
+
       // Block voluntary leaves while the session is running — 'open' tables never lock.
-      if (sm.lockLeaving(tableId) && socket.data.role !== 'admin') {
+      if (sm.lockLeaving(tableId) && socket.data.role !== 'admin' && !isEliminatedSitGoPlayer) {
         socket.emit('socket_error', { message: 'Session in progress — you cannot leave until the session ends.' })
         return
       }
 
       // Block voluntary leaves while the break is active — players must stay seated.
-      if (bm.isActive(tableId) && socket.data.role !== 'admin') {
+      if (bm.isActive(tableId) && socket.data.role !== 'admin' && !isEliminatedSitGoPlayer) {
         socket.emit('socket_error', { message: 'Break in progress — you must stay seated until it ends.' })
         return
       }
@@ -1103,6 +1258,20 @@ nextApp.prepare().then(async () => {
 
       if (gm.hasActiveHand(tableId)) {
         socket.emit('socket_error', { message: 'A hand is already in progress' })
+        return
+      }
+
+      // Sit & Go tables never take a manual start — the first hand deals
+      // itself automatically once the pre-tournament countdown reaches 0
+      // (startSitGoCountdown), and every hand after that via scheduleAutoStart,
+      // same as cash tables.
+      const { data: tableRow } = await supabase
+        .from('poker_tables')
+        .select('game_mode')
+        .eq('id', tableId)
+        .single()
+      if ((tableRow as { game_mode?: string } | null)?.game_mode === 'sit_go') {
+        socket.emit('socket_error', { message: 'Sit & Go hands start automatically' })
         return
       }
 
@@ -1507,6 +1676,7 @@ nextApp.prepare().then(async () => {
     for (const brk of bm.getAllBreaks()) {
       emitBreakUpdate(brk.tableId)
     }
+    void checkSitGoReadyTables().catch(err => console.error('[sitgo] periodic check crashed:', err))
   }, 5_000)
 
   httpServer.listen(port, hostname, () => {

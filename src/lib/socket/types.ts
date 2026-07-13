@@ -125,6 +125,9 @@ export type TableStatePayload = {
   // smallBlind/bigBlind above are already the CURRENT blinds for the table —
   // blindLevel is purely informational for the "Level N" badge/card display.
   blindLevel: number | null      // null for cash tables
+  // ── Sit & Go rebuy display (Step 7) ──────────────────────────────────────
+  buyIn: number | null           // null for cash tables
+  startingStack: number | null   // null for cash tables
   // ── Last Hands (admin countdown to auto-close) ──────────────────────────
   // Sourced straight from poker_tables (the source of truth) — never from
   // the server's in-memory cache — so reconnecting/joining sockets always
@@ -221,6 +224,14 @@ export interface ServerToClientEvents {
     tableId: string
     seconds: number
   }) => void
+  // Sit & Go: emitted to every registered player's socket(s) the instant the
+  // table fills up and is auto-seated — the lobby client should navigate to
+  // the table without waiting for a click.
+  sit_go_table_ready: (payload: { tableId: string }) => void
+  // Sit & Go: emitted to the table room when the pre-first-hand countdown
+  // begins, and re-emitted with the accurate remaining time to any socket
+  // that joins/reconnects mid-countdown.
+  sit_go_starting_countdown: (payload: { tableId: string; seconds: number }) => void
   // Emitted when all players are all-in and the remaining streets will be auto-dealt.
   runout_cards_revealed: (payload: {
     tableId: string

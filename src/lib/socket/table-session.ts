@@ -23,6 +23,8 @@ type TableRow = {
   blind_level: number
   last_hands_active: boolean
   last_hands_remaining: number | null
+  buy_in: number | null
+  starting_stack: number | null
 }
 
 type PlayerRow = {
@@ -41,7 +43,7 @@ export async function getTableState(
 ): Promise<TableStatePayload | null> {
   const { data: tableData } = await supabase
     .from('poker_tables')
-    .select('id, name, small_blind, big_blind, max_players, table_type, status, game_mode, prize_pool, sit_go_status, blind_level, last_hands_active, last_hands_remaining')
+    .select('id, name, small_blind, big_blind, max_players, table_type, status, game_mode, prize_pool, sit_go_status, blind_level, last_hands_active, last_hands_remaining, buy_in, starting_stack')
     .eq('id', tableId)
     .single()
 
@@ -124,6 +126,8 @@ export async function getTableState(
     prizePool: table.prize_pool,
     sitGoStatus: table.sit_go_status,
     blindLevel: table.game_mode === 'sit_go' ? table.blind_level : null,
+    buyIn: table.buy_in,
+    startingStack: table.starting_stack,
     // The DB row is the source of truth for Last Hands — this is what
     // reconnecting/joining sockets receive via table_state, independent of
     // the server's in-memory LastHandsManager cache.
@@ -362,6 +366,103 @@ export async function leaveTable(
     .eq('table_id', tableId)
     .eq('player_id', userId)
     .neq('status', 'left')
+}
+
+// Sit & Go only: bulk-seats every registrant the moment the table fills up,
+// so the tournament can start without anyone clicking "Enter Table". Assigns
+// seats 1..N in registration order.
+//
+// Idempotent and race-safe by construction, because this can legitimately run
+// more than once for the same table: the immediate trigger fired by
+// registerSitGoAction and the 5s periodic sweep in server.ts can both observe
+// the table as 'ready' before either finishes, and a stale client can still
+// call join_table (the legacy manual-entry path in joinTable() below) at the
+// same moment. So for every registrant:
+//   - an existing row already properly seated (status 'seated', real
+//     seat_number) is left untouched — never re-inserted;
+//   - an existing active row that ISN'T a real seat (e.g. spectating) is
+//     UPDATEd in place — inserting a second active row for the same player
+//     would violate table_players' one-active-row-per-player unique index;
+//   - only a genuinely absent player gets a fresh INSERT, one row at a time
+//     (not a single bulk insert) so a conflict on one player can never abort
+//     seating for everyone else in the same pass. A conflict there means a
+//     concurrent caller won the race for that specific player — re-read their
+//     row and move on, same recovery pattern joinTable() uses below.
+export async function seatAllSitGoRegistrants(supabase: DB, tableId: string): Promise<void> {
+  const { data: regRows } = await supabase
+    .from('sit_go_registrations')
+    .select('player_id')
+    .eq('table_id', tableId)
+    .order('registered_at', { ascending: true })
+
+  const registrants = (regRows as Array<{ player_id: string }> | null) ?? []
+  if (registrants.length === 0) return
+
+  const { data: activeRows } = await supabase
+    .from('table_players')
+    .select('id, player_id, seat_number, status')
+    .eq('table_id', tableId)
+    .neq('status', 'left')
+
+  type ActiveRow = { id: string; player_id: string; seat_number: number | null; status: string }
+  const byPlayer = new Map<string, ActiveRow>()
+  const occupiedSeats = new Set<number>()
+  for (const r of (activeRows as ActiveRow[] | null) ?? []) {
+    byPlayer.set(r.player_id, r)
+    if (r.status === 'seated' && r.seat_number != null) occupiedSeats.add(r.seat_number)
+  }
+
+  const claimNextFreeSeat = (): number => {
+    let seat = 1
+    while (occupiedSeats.has(seat)) seat++
+    occupiedSeats.add(seat)
+    return seat
+  }
+
+  for (const r of registrants) {
+    const existing = byPlayer.get(r.player_id)
+
+    if (existing?.status === 'seated' && existing.seat_number != null) {
+      continue  // already properly seated — nothing to do
+    }
+
+    if (existing) {
+      // Active but not a real seat (spectating) — upgrade the existing row
+      // in place instead of inserting a second one for the same player.
+      const seat = claimNextFreeSeat()
+      const { error } = await supabase
+        .from('table_players')
+        .update({ status: 'seated', seat_number: seat })
+        .eq('id', existing.id)
+      if (error) console.error(`[sitgo] seat upgrade failed  table=${tableId} player=${r.player_id}`, error)
+      continue
+    }
+
+    const seat = claimNextFreeSeat()
+    const { error: insertError } = await supabase
+      .from('table_players')
+      .insert({ table_id: tableId, player_id: r.player_id, seat_number: seat, status: 'seated' })
+
+    if (insertError) {
+      // A concurrent seat-assignment path won this player already — this
+      // seat number was never actually claimed by us, so release it before
+      // re-reading whichever row they landed in.
+      occupiedSeats.delete(seat)
+      console.log(`[sitgo] seat insert conflict, re-checking  table=${tableId} player=${r.player_id}  ${insertError.message}`)
+      const { data: retryRow } = await supabase
+        .from('table_players')
+        .select('seat_number')
+        .eq('table_id', tableId)
+        .eq('player_id', r.player_id)
+        .neq('status', 'left')
+        .maybeSingle()
+      const retrySeat = (retryRow as { seat_number: number | null } | null)?.seat_number
+      if (retrySeat != null) occupiedSeats.add(retrySeat)
+      // If still nothing landed, this registrant stays unseated for this
+      // pass — the next sweep/retry call (this function is idempotent) will
+      // pick them up.
+    }
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

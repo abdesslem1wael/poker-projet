@@ -22,6 +22,7 @@ import type { AppSocket } from '@/lib/socket/client'
 import { didNewHandStart } from '@/lib/socket/hand-transition'
 import { soundManager } from '@/lib/sounds'
 import type { SoundName } from '@/lib/sounds'
+import { rebuySitGoAction } from '@/app/actions/sitgo'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -1013,6 +1014,94 @@ function DealerTipModal({ winAmount, onTip, onSkip }: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// EliminationModal — Sit & Go bust-out screen
+// ─────────────────────────────────────────────────────────────────────────────
+
+function EliminationModal({
+  tournamentFinished, buyIn, pending, error, onLeave, onRebuy,
+}: {
+  tournamentFinished: boolean
+  buyIn: number | null
+  pending: boolean
+  error: string | null
+  onLeave: () => void
+  onRebuy: () => void
+}) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 1000,
+      background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div style={{
+        background: 'linear-gradient(145deg, #0e1c30, #0a1520)',
+        border: '1px solid rgba(201,168,76,0.35)',
+        borderRadius: 14, padding: '28px 30px', width: 300, textAlign: 'center',
+        boxShadow: '0 8px 40px rgba(0,0,0,0.8), 0 0 0 1px rgba(201,168,76,0.08)',
+      }}>
+        <div style={{ fontSize: 32, marginBottom: 10 }}>{tournamentFinished ? '🏁' : '💀'}</div>
+        <div style={{ color: '#fca5a5', fontWeight: 700, fontSize: 16, marginBottom: 6 }}>
+          {tournamentFinished ? 'Tournament over' : "You're eliminated"}
+        </div>
+        <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 18 }}>
+          {tournamentFinished
+            ? 'You ran out of chips and the tournament has ended.'
+            : 'You ran out of chips. Leave the table or rebuy to keep playing.'}
+        </div>
+
+        {error && (
+          <div style={{
+            background: 'rgba(185,28,28,0.12)', border: '1px solid rgba(185,28,28,0.4)',
+            borderRadius: 8, padding: '8px 10px', marginBottom: 12,
+            color: '#fca5a5', fontSize: 12,
+          }}>
+            {error}
+          </div>
+        )}
+
+        {tournamentFinished ? (
+          <button
+            onClick={onLeave}
+            disabled={pending}
+            style={{
+              width: '100%', background: 'rgba(201,168,76,0.12)', border: '1px solid rgba(201,168,76,0.3)',
+              borderRadius: 8, padding: '10px 0', color: '#e8c97a', fontWeight: 700, fontSize: 13,
+              cursor: pending ? 'not-allowed' : 'pointer', opacity: pending ? 0.6 : 1,
+            }}
+          >
+            Back to Lobby
+          </button>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <button
+              onClick={onRebuy}
+              disabled={pending}
+              style={{
+                width: '100%', background: '#065f46', border: '1px solid #047857',
+                borderRadius: 8, padding: '10px 0', color: '#a7f3d0', fontWeight: 700, fontSize: 13,
+                cursor: pending ? 'not-allowed' : 'pointer', opacity: pending ? 0.6 : 1,
+              }}
+            >
+              {pending ? 'Rebuying…' : `Rebuy${buyIn != null ? ` for ${buyIn.toLocaleString()}` : ''}`}
+            </button>
+            <button
+              onClick={onLeave}
+              disabled={pending}
+              style={{
+                width: '100%', background: 'transparent', border: '1px solid #3f3f46',
+                borderRadius: 8, padding: '10px 0', color: '#a1a1aa', fontWeight: 600, fontSize: 13,
+                cursor: pending ? 'not-allowed' : 'pointer', opacity: pending ? 0.6 : 1,
+              }}
+            >
+              Leave Table
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1118,6 +1207,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [breakCountdownDisplay, setBreakCountdownDisplay] = useState<number>(0)
   const [breakDurationDisplay, setBreakDurationDisplay] = useState<number>(0)
   const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' } | null>(null)
+  const [sitGoStartCountdown, setSitGoStartCountdown] = useState<number | null>(null)
+  const [rebuyPending, setRebuyPending]  = useState(false)
+  const [rebuyError, setRebuyError]      = useState<string | null>(null)
   const [lastHandsRemaining, setLastHandsRemaining] = useState<number | null>(null)
   const [lastHandsToasts, setLastHandsToasts] = useState<LastHandsToast[]>([])
   const [muted, setMuted]                = useState(false)
@@ -1144,6 +1236,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   )
 
   const nextHandTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null)
+  const sitGoStartTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const socketRef          = useRef<AppSocket | null>(null)
   const prevShowdownRef    = useRef<ShowdownPayload | null>(null)
   const sessionRef         = useRef<SessionInfo | null>(null)
@@ -1194,7 +1287,16 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const breakActive = breakInfo?.phase === 'active'
   const breakPendingHandEnd = breakInfo?.phase === 'awaiting_hand_end'
   const canLeave   = (!sessionActive || isAdmin || state.tableType === 'open') && (isAdmin || !breakActive)
-  const canStart   = myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired && !hasHandEverStartedRef.current && !breakPendingHandEnd && !breakActive
+  // Sit & Go tables never take a manual start — the first hand deals itself
+  // once the pre-tournament countdown (sitGoStartCountdown) reaches 0.
+  const canStart   = state.gameMode !== 'sit_go' && myCurrentStatus === 'seated' && !hand && seatedCnt >= 2 && nextHandIn === null && !sessionExpired && !hasHandEverStartedRef.current && !breakPendingHandEnd && !breakActive
+
+  // Sit & Go elimination screen — derived straight from table_state (not a
+  // one-shot event) so it reliably reappears on refresh/reconnect while the
+  // player is still marked eliminated.
+  const amIEliminated = state.gameMode === 'sit_go'
+    && state.seats.some(s => s.playerId === currentUserId && s.eliminated)
+  const sitGoTournamentFinished = state.sitGoStatus === 'finished'
 
   // Can I afford to call? If not, only all-in or fold is possible.
   const mustGoAllIn = !canCheck && callAmt > myStack
@@ -1755,6 +1857,19 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         nextHandTimerRef.current = id
       }
 
+      const onSitGoStartingCountdown = (p: { tableId: string; seconds: number }) => {
+        if (!active || p.tableId !== initialState.tableId) return
+        if (sitGoStartTimerRef.current) { clearInterval(sitGoStartTimerRef.current); sitGoStartTimerRef.current = null }
+        setSitGoStartCountdown(p.seconds)
+        const id = setInterval(() => {
+          setSitGoStartCountdown(prev => {
+            if (prev === null || prev <= 1) { clearInterval(id); sitGoStartTimerRef.current = null; return null }
+            return prev - 1
+          })
+        }, 1000)
+        sitGoStartTimerRef.current = id
+      }
+
       const onSessionUpdate = (p: { tableId: string; tableName: string; secondsRemaining: number; isExpired: boolean }) => {
         if (!active || p.tableId !== initialState.tableId) return
         const info: SessionInfo = { ...p, syncedAt: Date.now() }
@@ -1852,6 +1967,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('action_result', onActionResult)
       socket.on('turn_timer_start', onTurnTimerStart)
       socket.on('next_hand_countdown', onNextHandCountdown)
+      socket.on('sit_go_starting_countdown', onSitGoStartingCountdown)
       socket.on('runout_cards_revealed', onRunoutCardsRevealed)
       socket.on('hand_revealed', onHandRevealed)
       socket.on('session_update', onSessionUpdate)
@@ -1873,6 +1989,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('table_state', onTableState); socket.off('deal_cards', onDealCards)
         socket.off('showdown_result', onShowdownResult); socket.off('action_result', onActionResult)
         socket.off('turn_timer_start', onTurnTimerStart); socket.off('next_hand_countdown', onNextHandCountdown)
+        socket.off('sit_go_starting_countdown', onSitGoStartingCountdown)
         socket.off('runout_cards_revealed', onRunoutCardsRevealed); socket.off('hand_revealed', onHandRevealed)
         socket.off('session_update', onSessionUpdate); socket.off('break_update', onBreakUpdate)
         socket.off('last_hands_update', onLastHandsUpdate); socket.off('last_hands_announcement', onLastHandsAnnouncement)
@@ -1880,6 +1997,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('table_chat_message', onChatMessage)
         socket.off('reaction_sent', onReactionSent)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
+        if (sitGoStartTimerRef.current) { clearInterval(sitGoStartTimerRef.current); sitGoStartTimerRef.current = null }
         if (kickedOverlayTimerRef.current) { clearTimeout(kickedOverlayTimerRef.current); kickedOverlayTimerRef.current = null }
         heroCardTimersRef.current.forEach(clearTimeout); heroCardTimersRef.current = []
         seatAnimTimersRef.current.forEach(clearTimeout); seatAnimTimersRef.current = []
@@ -1905,6 +2023,15 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     }
     s.on('table_left', onLeft)
     s.emit('leave_table', { tableId: initialState.tableId })
+  }
+
+  function handleRebuy() {
+    setRebuyError(null)
+    setRebuyPending(true)
+    rebuySitGoAction(initialState.tableId).then(res => {
+      setRebuyPending(false)
+      if ('error' in res) setRebuyError(res.error)
+    })
   }
 
   function handleStartHand() {
@@ -2173,6 +2300,18 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         </div>
       )}
 
+      {/* ── Sit & Go elimination overlay ────────────────────────────────────── */}
+      {amIEliminated && !kickedMsg && (
+        <EliminationModal
+          tournamentFinished={sitGoTournamentFinished}
+          buyIn={state.buyIn}
+          pending={rebuyPending || leaving}
+          error={rebuyError}
+          onLeave={handleLeave}
+          onRebuy={handleRebuy}
+        />
+      )}
+
       {/* ── Out of chips toast ─────────────────────────────────────────────── */}
       {outOfChipsMsg && (
         <div style={{
@@ -2264,6 +2403,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           {nextHandIn != null && !hand && (
             <span style={{ background: '#451a03', color: '#fbbf24', fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 4 }}>
               Next hand in {nextHandIn}s…
+            </span>
+          )}
+          {sitGoStartCountdown != null && !hand && (
+            <span style={{ background: 'rgba(16,185,129,0.18)', color: '#6ee7b7', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4 }}>
+              Game starts in {sitGoStartCountdown}s
             </span>
           )}
           {(showdownResult || prevHandResult) && (
@@ -3698,8 +3842,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                       )}
 
                       {!hand && !canStart && !showdownResult && myStatus === 'seated' && (
-                        <p style={{ color: '#475569', fontSize: 12 }}>
-                          {breakActive
+                        <p style={{ color: sitGoStartCountdown != null ? '#6ee7b7' : '#475569', fontSize: sitGoStartCountdown != null ? 14 : 12, fontWeight: sitGoStartCountdown != null ? 700 : 400 }}>
+                          {sitGoStartCountdown != null
+                            ? `Game starts in ${sitGoStartCountdown}s`
+                            : breakActive
                             ? `Break time — resumes in ${formatSessionTime(breakDurationDisplay)}`
                             : breakPendingHandEnd
                             ? 'Break will start after this hand.'
