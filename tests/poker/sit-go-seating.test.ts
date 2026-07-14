@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { seatAllSitGoRegistrants } from '../../src/lib/socket/table-session'
+import { seatAllSitGoRegistrants, getSeatedPlayerCount, isSitGoFullySeated } from '../../src/lib/socket/table-session'
 
 // ── Minimal Supabase mock tailored to seatAllSitGoRegistrants ──────────────
 //
@@ -219,5 +219,39 @@ describe('seatAllSitGoRegistrants', () => {
     expect(seats.find(r => r.player_id === 'p2')?.seat_number).toBe(9)
     expect(seats.map(r => r.player_id).sort()).toEqual(['p1', 'p2', 'p3'])
     expect(new Set(seats.map(r => r.seat_number)).size).toBe(3)
+  })
+})
+
+// ── Sit & Go countdown gating ───────────────────────────────────────────────
+// Full registration alone must never be enough to start the pre-first-hand
+// countdown — only every registrant actually holding a real seat is.
+
+describe('sit-go countdown gating', () => {
+  it('is not fully seated when only 2 of 3 registrants landed a real seat', async () => {
+    const db = new MockDB()
+    db.seedRegistration('p1', '2024-01-01T10:00:00Z')
+    db.seedRegistration('p2', '2024-01-01T10:01:00Z')
+    db.seedRegistration('p3', '2024-01-01T10:02:00Z')
+    // A partial seating pass: p1 and p2 landed seats, p3 didn't (e.g. it lost
+    // a seat-assignment race and is waiting on the next sweep).
+    db.seedPlayer({ table_id: TABLE, player_id: 'p1', seat_number: 1, status: 'seated' })
+    db.seedPlayer({ table_id: TABLE, player_id: 'p2', seat_number: 2, status: 'seated' })
+
+    const seatedCount = await getSeatedPlayerCount(db as never, TABLE)
+    expect(seatedCount).toBe(2)
+    expect(isSitGoFullySeated(seatedCount, 3)).toBe(false)
+  })
+
+  it('is fully seated only once seatAllSitGoRegistrants has seated every registrant', async () => {
+    const db = new MockDB()
+    db.seedRegistration('p1', '2024-01-01T10:00:00Z')
+    db.seedRegistration('p2', '2024-01-01T10:01:00Z')
+    db.seedRegistration('p3', '2024-01-01T10:02:00Z')
+
+    await seatAllSitGoRegistrants(db as never, TABLE)
+
+    const seatedCount = await getSeatedPlayerCount(db as never, TABLE)
+    expect(seatedCount).toBe(3)
+    expect(isSitGoFullySeated(seatedCount, 3)).toBe(true)
   })
 })

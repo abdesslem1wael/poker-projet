@@ -6,6 +6,13 @@ import { registerSitGoAction, unregisterSitGoAction } from '@/app/actions/sitgo'
 import { getSocket } from '@/lib/socket/client'
 import type { AppSocket } from '@/lib/socket/client'
 
+type SitGoPlayerRow = {
+  playerId: string
+  username: string
+  status: 'registered' | 'eliminated' | 'winner'
+  rank: number | null
+}
+
 type SitGoTableRow = {
   id: string
   name: string
@@ -19,6 +26,7 @@ type SitGoTableRow = {
   registeredCount: number
   isRegistered: boolean
   blind_level: number
+  players: SitGoPlayerRow[]
 }
 
 const statusLabel: Record<SitGoTableRow['sit_go_status'], string> = {
@@ -248,6 +256,25 @@ export default function SitGoTableCard({
           <p className="mt-0.5 font-bold tabular-nums text-amber-400">{table.prize_pool.toLocaleString('en-US')}</p>
         </div>
       </div>
+
+      {table.players.length > 0 && (
+        <div className="mb-3 rounded-lg bg-black/20 px-2.5 py-2">
+          <p className="mb-1.5 text-[9px] font-semibold uppercase tracking-wide text-zinc-500">Players</p>
+          <ul className="flex flex-col gap-1">
+            {table.players.map((p) => (
+              <li key={p.playerId} className="flex items-center gap-1.5 text-xs">
+                {p.rank === 1 && <span title="Winner">🏆</span>}
+                <span className="min-w-0 flex-1 truncate font-semibold text-zinc-300">{p.username}</span>
+                {p.rank != null && (
+                  <span className="shrink-0 text-[10px] font-bold text-zinc-500">
+                    {p.rank === 1 ? 'Winner' : `#${p.rank}`}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {error && (
         <p className="mb-2.5 rounded-lg bg-red-950/40 px-3 py-2 text-xs text-red-400 ring-1 ring-red-800/50">

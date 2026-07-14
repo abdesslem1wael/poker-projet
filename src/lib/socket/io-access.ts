@@ -33,3 +33,14 @@ export function triggerTableStateRefresh(tableId: string): void {
   const fn = (global as Record<string, unknown>).__triggerTableStateRefresh as ((tableId: string) => void) | undefined
   fn?.(tableId)
 }
+
+// Tells server.ts that a player's pending Sit & Go rebuy/leave decision has
+// been resolved by a successful rebuy (see rebuySitGoAction) — clears their
+// entry in the in-memory decision tracker and, if they were the last player
+// still pending, lets the next hand proceed. The leave path doesn't need
+// this bridge: leaving happens entirely inside server.ts's own leave_table
+// socket handler, which can resolve the decision directly.
+export function triggerSitGoRebuyResolved(tableId: string, playerId: string): void {
+  const fn = (global as Record<string, unknown>).__triggerSitGoRebuyResolved as ((tableId: string, playerId: string) => void) | undefined
+  fn?.(tableId, playerId)
+}

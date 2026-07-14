@@ -72,6 +72,15 @@ class MockDB {
   markedLeft: string[] = []   // ids passed to update({status:'left'})
   insertCalls: Row[] = []
   insertError: { message: string } | null = null
+  // Number of inserts that should fail before insertError clears itself.
+  // Defaults to "fails forever" (existing tests rely on this). Set to a
+  // finite number to simulate a transient race that clears after N attempts.
+  insertErrorLimit = Infinity
+  private insertErrorCount = 0
+  // Row to materialize (as if a concurrent writer won the race) the moment
+  // the injected insertError fires — simulates a different player's insert
+  // landing at the seat this call was about to claim.
+  raceWinnerRow: Row | null = null
 
   seedTable(row: Row) { this._tableRows.push(row) }
   seedPlayer(row: Row) { this._playerRows.push(row) }
@@ -94,9 +103,18 @@ class MockDB {
         select: (cols: string) => new QueryBuilder(rows).select(cols),
         insert: (row: Row) => {
           const err = insertErr()
-          if (err) return Promise.resolve({ error: err })
+          if (err && this.insertErrorCount < this.insertErrorLimit) {
+            this.insertErrorCount++
+            if (this.insertErrorCount >= this.insertErrorLimit) this.insertError = null
+            if (this.raceWinnerRow) {
+              const winner = this.raceWinnerRow
+              this.raceWinnerRow = null
+              pushPlayer({ id: `race-${Date.now()}-${Math.random()}`, joined_at: new Date().toISOString(), ...winner })
+            }
+            return Promise.resolve({ error: err })
+          }
           insertCalls.push(row)
-          pushPlayer({ id: `new-${Date.now()}`, joined_at: new Date().toISOString(), ...row })
+          pushPlayer({ id: `new-${Date.now()}-${Math.random()}`, joined_at: new Date().toISOString(), ...row })
           return Promise.resolve({ error: null })
         },
         update: (_fields: Row) => {
@@ -233,6 +251,54 @@ describe('joinTable', () => {
 
     const result = await joinTable(db as never, TABLE, 'user-1')
     expect(result).toHaveProperty('error', 'Table is closed')
+  })
+
+  it('retries with a different seat instead of surfacing the raw DB error when a concurrent writer wins the first seat', async () => {
+    const db = new MockDB()
+    db.seedTable(tableRow())
+    // Simulates the Sit & Go auto-seat sweep (or another player's own
+    // join_table) claiming seat 1 in between this call's read and insert.
+    db.insertError = { message: 'duplicate key value violates unique constraint "table_players_active_seat"' }
+    db.insertErrorLimit = 1
+    db.raceWinnerRow = { table_id: TABLE, player_id: 'other-player', seat_number: 1, status: 'seated' }
+
+    const result = await joinTable(db as never, TABLE, 'user-1')
+    expect(result).toEqual({ seatNumber: 2 })
+    expect(db.insertCalls).toHaveLength(1)
+    expect(db.insertCalls[0]).toMatchObject({ player_id: 'user-1', seat_number: 2 })
+  })
+
+  it('returns a clean error (never the raw DB message) once seat retries are exhausted', async () => {
+    const db = new MockDB()
+    db.seedTable(tableRow())
+    // Every attempt fails and no seat is ever freed up — a persistently stuck race.
+    db.insertError = { message: 'duplicate key value violates unique constraint "table_players_active_seat"' }
+
+    const result = await joinTable(db as never, TABLE, 'user-1')
+    expect(result).toHaveProperty('error')
+    expect((result as { error: string }).error).not.toMatch(/constraint|duplicate key/i)
+  })
+
+  it('reconnecting/refreshing twice never creates a duplicate row', async () => {
+    const db = new MockDB()
+    db.seedTable(tableRow())
+    db.seedPlayer({ id: 'row1', table_id: TABLE, player_id: 'user-1', seat_number: 4, status: 'seated', joined_at: '2024-01-01T10:00:00Z' })
+
+    const first = await joinTable(db as never, TABLE, 'user-1')
+    const second = await joinTable(db as never, TABLE, 'user-1')
+
+    expect(first).toEqual({ seatNumber: 4 })
+    expect(second).toEqual({ seatNumber: 4 })
+    expect(db.insertCalls).toHaveLength(0)
+  })
+
+  it('cash table join is unaffected by the Sit & Go seat-retry logic', async () => {
+    const db = new MockDB()
+    db.seedTable(tableRow({ game_mode: 'cash' }))
+
+    const result = await joinTable(db as never, TABLE, 'user-1')
+    expect(result).toEqual({ seatNumber: 1 })
+    expect(db.insertCalls).toHaveLength(1)
   })
 
   it('returns error when the table is full', async () => {

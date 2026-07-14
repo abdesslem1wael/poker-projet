@@ -14,6 +14,13 @@ type CashTableRow = {
   status: 'waiting' | 'active'
 }
 
+type SitGoPlayerRow = {
+  playerId: string
+  username: string
+  status: 'registered' | 'eliminated' | 'winner'
+  rank: number | null
+}
+
 type SitGoTableRow = {
   id: string
   name: string
@@ -27,6 +34,7 @@ type SitGoTableRow = {
   registeredCount: number
   isRegistered: boolean
   blind_level: number
+  players: SitGoPlayerRow[]
 }
 
 export default function LobbyTabs({

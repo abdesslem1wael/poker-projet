@@ -284,23 +284,32 @@ export async function joinTable(
     return { seatNumber: seat }
   }
 
-  // First-time join: find an available seat and insert.
-  const seat = await findFirstAvailableSeat(supabase, tableId, table.max_players)
-  if (seat == null) return { error: 'Table is full' }
+  // First-time join: find an available seat and insert, retrying against a
+  // freshly recomputed seat if a concurrent writer claims one first. This is
+  // a real race — not just theoretical — for Sit & Go tables, where the bulk
+  // auto-seat sweep (seatAllSitGoRegistrants) and every registered player's
+  // own join_table call can all land within milliseconds of each other at
+  // the moment the table fills up.
+  const MAX_SEAT_ATTEMPTS = 5
+  for (let attempt = 0; attempt < MAX_SEAT_ATTEMPTS; attempt++) {
+    const seat = await findFirstAvailableSeat(supabase, tableId, table.max_players)
+    if (seat == null) return { error: 'Table is full' }
 
-  console.log(`[join] userId=${userId} tableId=${tableId} inserting at seat=${seat}`)
+    console.log(`[join] userId=${userId} tableId=${tableId} inserting at seat=${seat} (attempt ${attempt + 1})`)
 
-  const { error: insertError } = await supabase.from('table_players').insert({
-    table_id: tableId,
-    player_id: userId,
-    seat_number: seat,
-    status: 'seated',
-  })
+    const { error: insertError } = await supabase.from('table_players').insert({
+      table_id: tableId,
+      player_id: userId,
+      seat_number: seat,
+      status: 'seated',
+    })
 
-  if (insertError) {
-    // Unique constraint fired — a concurrent join for this exact user completed first.
-    // Re-fetch THIS user's row only; never fall back to any other player's row.
-    console.log(`[join] insert conflict  userId=${userId} tableId=${tableId} — re-fetching own row`)
+    if (!insertError) return { seatNumber: seat }
+
+    // Unique constraint fired. Re-fetch THIS user's row only — never fall
+    // back to any other player's row. This covers a concurrent join for the
+    // exact same user completing first.
+    console.log(`[join] insert conflict  userId=${userId} tableId=${tableId} — re-fetching own row  ${insertError.message}`)
     const { data: retryData } = await supabase
       .from('table_players')
       .select('status, seat_number')
@@ -314,10 +323,12 @@ export async function joinTable(
         return { seatNumber: retry.seat_number }
       }
     }
-    return { error: insertError.message }
+    // Own row still doesn't exist — the conflict was over the seat itself,
+    // claimed by a different player between our read and our insert. Loop
+    // and pick another free seat instead of surfacing the raw DB error.
   }
 
-  return { seatNumber: seat }
+  return { error: 'Could not find a seat — please try again.' }
 }
 
 export async function spectateTable(
@@ -463,6 +474,100 @@ export async function seatAllSitGoRegistrants(supabase: DB, tableId: string): Pr
       // pick them up.
     }
   }
+}
+
+// Counts active (status = 'seated') players at a table. Used by the Sit & Go
+// auto-start flow to decide whether every registrant actually landed a real
+// seat before starting the pre-first-hand countdown — full registration
+// alone is not enough, since seatAllSitGoRegistrants can legitimately leave
+// a registrant unseated for a pass if it lost a seat-assignment race.
+export async function getSeatedPlayerCount(supabase: DB, tableId: string): Promise<number> {
+  const { data } = await supabase
+    .from('table_players')
+    .select('id')
+    .eq('table_id', tableId)
+    .eq('status', 'seated')
+
+  return ((data as Array<{ id: string }> | null) ?? []).length
+}
+
+// A Sit & Go is ready to deal its first hand only once every registered seat
+// is actually occupied — not merely once registration filled up.
+export function isSitGoFullySeated(seatedCount: number, maxPlayers: number): boolean {
+  return seatedCount === maxPlayers
+}
+
+// ── Blind levels (wall-clock, not hand-count) ───────────────────────────────
+// small_blind/big_blind on poker_tables are treated as the CURRENT blinds —
+// doStartHand() reads them fresh at the start of every hand, so bumping them
+// here is all that's needed; no change to GameManager or the hand-dealing flow.
+// Multiplier schedule is 1-indexed by level (index 0 = level 1, unused level 0).
+export const SIT_GO_BLIND_MULTIPLIERS = [1, 2, 3, 5, 8, 12, 20]
+export const SIT_GO_BLIND_LEVEL_INTERVAL_MS = 7 * 60 * 1000  // 7 minutes per level
+
+// Derives the level a Sit & Go should be at purely from elapsed wall-clock
+// time since it started — no hand count, no in-memory timer. That makes the
+// level always independently reconstructable from sit_go_started_at alone,
+// so it can never reset on refresh/reconnect or drift after a server restart.
+export function computeSitGoBlindLevel(startedAt: string, maxLevel: number): number {
+  const elapsedMs = Math.max(0, Date.now() - new Date(startedAt).getTime())
+  const level = Math.floor(elapsedMs / SIT_GO_BLIND_LEVEL_INTERVAL_MS) + 1
+  return Math.min(level, maxLevel)
+}
+
+// Recomputes a running Sit & Go table's blind level from elapsed time since
+// sit_go_started_at (set once, atomically, alongside the 'ready' → 'running'
+// transition) and persists it if it has increased. Levels only ever move
+// forward — a straggling reconnect or an out-of-order sweep pass can never
+// roll one back.
+export async function syncSitGoBlindLevel(
+  supabase: DB,
+  tableId: string,
+): Promise<{ changed: boolean }> {
+  const { data: tableRow } = await supabase
+    .from('poker_tables')
+    .select('sit_go_status, sit_go_started_at, blind_level, original_small_blind, original_big_blind')
+    .eq('id', tableId)
+    .single()
+
+  const row = tableRow as {
+    sit_go_status: string | null
+    sit_go_started_at: string | null
+    blind_level: number
+    original_small_blind: number | null
+    original_big_blind: number | null
+  } | null
+
+  if (
+    !row ||
+    row.sit_go_status !== 'running' ||
+    !row.sit_go_started_at ||
+    !row.original_small_blind ||
+    !row.original_big_blind
+  ) {
+    return { changed: false }
+  }
+
+  const maxLevel = SIT_GO_BLIND_MULTIPLIERS.length
+  const targetLevel = computeSitGoBlindLevel(row.sit_go_started_at, maxLevel)
+  if (targetLevel <= row.blind_level) return { changed: false }
+
+  const multiplier = SIT_GO_BLIND_MULTIPLIERS[targetLevel - 1]
+  const smallBlind = row.original_small_blind * multiplier
+  const bigBlind = row.original_big_blind * multiplier
+
+  const { error } = await supabase
+    .from('poker_tables')
+    .update({ blind_level: targetLevel, small_blind: smallBlind, big_blind: bigBlind })
+    .eq('id', tableId)
+
+  if (error) {
+    console.error(`[sitgo] blind level update failed  table=${tableId}`, error)
+    return { changed: false }
+  }
+
+  console.log(`[sitgo] blind level up  table=${tableId} level=${targetLevel} blinds=${smallBlind}/${bigBlind}`)
+  return { changed: true }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

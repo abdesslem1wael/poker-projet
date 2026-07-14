@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
 import { logoutAction } from '@/app/actions/auth'
 import LobbyTabs from './LobbyTabs'
 import PasswordChangeModal from './PasswordChangeModal'
@@ -26,12 +27,57 @@ type TableRow = {
 type RegistrationRow = {
   table_id: string
   player_id: string
+  status: 'registered' | 'eliminated' | 'winner'
+  eliminated_at: string | null
 }
 
 type Profile = {
   username: string
   role: 'admin' | 'player' | 'super_admin'
   must_change_password: boolean
+}
+
+type ProfileRow = {
+  id: string
+  username: string
+}
+
+type SitGoPlayerRow = {
+  playerId: string
+  username: string
+  status: 'registered' | 'eliminated' | 'winner'
+  rank: number | null
+}
+
+// Finishing rank per registered player: the winner is always 1st, then
+// eliminated players slot in behind them in reverse elimination order (the
+// last player busted took 2nd, the first player busted took last place).
+// Still-active players (status = 'registered' while the tournament is still
+// running, or before it starts) have no rank yet.
+function rankSitGoPlayers(regs: RegistrationRow[], usernameById: Map<string, string>): SitGoPlayerRow[] {
+  const total = regs.length
+  const eliminatedSorted = regs
+    .filter((r) => r.status === 'eliminated')
+    .sort((a, b) => new Date(a.eliminated_at ?? 0).getTime() - new Date(b.eliminated_at ?? 0).getTime())
+  const rankByPlayerId = new Map<string, number>()
+  eliminatedSorted.forEach((r, i) => rankByPlayerId.set(r.player_id, total - i))
+  for (const r of regs) {
+    if (r.status === 'winner') rankByPlayerId.set(r.player_id, 1)
+  }
+
+  return regs
+    .map((r) => ({
+      playerId: r.player_id,
+      username: usernameById.get(r.player_id) ?? 'Unknown',
+      status: r.status,
+      rank: rankByPlayerId.get(r.player_id) ?? null,
+    }))
+    .sort((a, b) => {
+      if (a.rank != null && b.rank != null) return a.rank - b.rank
+      if (a.rank != null) return -1
+      if (b.rank != null) return 1
+      return a.username.localeCompare(b.username)
+    })
 }
 
 type Wallet = {
@@ -67,15 +113,32 @@ export default async function LobbyPage() {
   const sitGoIds = tables.filter((t) => t.game_mode === 'sit_go').map((t) => t.id)
 
   const { data: registrationsData } = sitGoIds.length > 0
-    ? await supabase.from('sit_go_registrations').select('table_id, player_id').in('table_id', sitGoIds)
+    ? await supabase.from('sit_go_registrations').select('table_id, player_id, status, eliminated_at').in('table_id', sitGoIds)
     : { data: [] as RegistrationRow[] }
 
   const registrations = (registrationsData as RegistrationRow[] | null) ?? []
+
+  // Other players' usernames aren't readable through the anon+cookies client
+  // (profiles RLS only reliably covers your own row) -- same reason page.tsx
+  // for the table view reads other seats' profiles via the admin client.
+  const registeredPlayerIds = [...new Set(registrations.map((r) => r.player_id))]
+  const { data: registeredProfilesData } = registeredPlayerIds.length > 0
+    ? await createAdminClient().from('profiles').select('id, username').in('id', registeredPlayerIds)
+    : { data: [] as ProfileRow[] }
+  const usernameById = new Map<string, string>()
+  for (const p of (registeredProfilesData as ProfileRow[] | null) ?? []) {
+    usernameById.set(p.id, p.username)
+  }
+
   const countByTable = new Map<string, number>()
   const registeredByUser = new Set<string>()
+  const registrationsByTable = new Map<string, RegistrationRow[]>()
   for (const r of registrations) {
     countByTable.set(r.table_id, (countByTable.get(r.table_id) ?? 0) + 1)
     if (r.player_id === user.id) registeredByUser.add(r.table_id)
+    const list = registrationsByTable.get(r.table_id)
+    if (list) list.push(r)
+    else registrationsByTable.set(r.table_id, [r])
   }
 
   const sitGoTables = tables
@@ -93,6 +156,7 @@ export default async function LobbyPage() {
       registeredCount: countByTable.get(t.id) ?? 0,
       isRegistered: registeredByUser.has(t.id),
       blind_level: t.blind_level,
+      players: rankSitGoPlayers(registrationsByTable.get(t.id) ?? [], usernameById),
     }))
 
   return (

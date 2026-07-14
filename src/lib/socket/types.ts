@@ -192,6 +192,18 @@ export type ChatMessage = {
   createdAt: string  // ISO timestamp
 }
 
+// ── Sit & Go rebuy/leave decision window (Fix 5) ────────────────────────────
+// Sit & Go only. When a hand eliminates one or more registered players and
+// the tournament isn't over, the next hand is paused until every player in
+// pendingPlayerIds has rebought, left, or their individual 65s decision
+// window has timed out (auto-treated as Leave). All players eliminated in
+// the same hand share one deadline, hence a single secondsRemaining here.
+export type SitGoRebuyStatePayload = {
+  tableId: string
+  pendingPlayerIds: string[]   // empty = no decision pending, next hand may proceed
+  secondsRemaining: number     // 0 when pendingPlayerIds is empty
+}
+
 // ── Server → Client ────────────────────────────────────────────────────────
 export interface ServerToClientEvents {
   socket_ready: (payload: { userId: string; username: string }) => void
@@ -251,7 +263,11 @@ export interface ServerToClientEvents {
     isExpired: boolean
   }) => void
   // Emitted only to the socket(s) of a player who has been removed from a table.
-  kicked_from_table: (payload: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => void
+  kicked_from_table: (payload: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' | 'rebuy_timeout' }) => void
+  // Sit & Go only: broadcast to the whole table whenever the pending rebuy/
+  // leave decision set changes (started, a player resolves, or a reconnect
+  // needs the current state resent). Empty pendingPlayerIds clears it.
+  sit_go_rebuy_update: (payload: SitGoRebuyStatePayload) => void
   // Emitted on break state changes and periodically while a break is scheduled/running.
   break_update: (payload: BreakStatePayload) => void
   // Persistent Last Hands countdown state — drives the "Last hands: X" badge.

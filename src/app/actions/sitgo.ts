@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
-import { getIo, triggerSitGoCheck, triggerTableStateRefresh } from '@/lib/socket/io-access'
+import { getIo, triggerSitGoCheck, triggerTableStateRefresh, triggerSitGoRebuyResolved } from '@/lib/socket/io-access'
 
 export type ActionResult = { ok: true } | { error: string }
 
@@ -96,6 +96,11 @@ export async function rebuySitGoAction(tableId: string): Promise<ActionResult> {
   // Routed through server.ts (not built here) so an active hand's public
   // state isn't wrongly overwritten with "no hand in progress".
   triggerTableStateRefresh(tableId)
+
+  // Resolves this player's pending rebuy/leave decision (if any) — clears
+  // their 65s timer and, if everyone eliminated by the last hand has now
+  // decided, lets the next hand proceed instead of waiting out the timeout.
+  triggerSitGoRebuyResolved(tableId, user.id)
 
   revalidatePath('/lobby')
   return { ok: true }

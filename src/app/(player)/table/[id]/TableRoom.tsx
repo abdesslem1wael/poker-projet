@@ -1018,12 +1018,13 @@ function DealerTipModal({ winAmount, onTip, onSkip }: {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function EliminationModal({
-  tournamentFinished, buyIn, pending, error, onLeave, onRebuy,
+  tournamentFinished, buyIn, pending, error, secondsRemaining, onLeave, onRebuy,
 }: {
   tournamentFinished: boolean
   buyIn: number | null
   pending: boolean
   error: string | null
+  secondsRemaining: number | null  // server-controlled Rebuy/Leave decision countdown
   onLeave: () => void
   onRebuy: () => void
 }) {
@@ -1042,11 +1043,21 @@ function EliminationModal({
         <div style={{ color: '#fca5a5', fontWeight: 700, fontSize: 16, marginBottom: 6 }}>
           {tournamentFinished ? 'Tournament over' : "You're eliminated"}
         </div>
-        <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 18 }}>
+        <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: !tournamentFinished && secondsRemaining != null ? 10 : 18 }}>
           {tournamentFinished
             ? 'You ran out of chips and the tournament has ended.'
             : 'You ran out of chips. Leave the table or rebuy to keep playing.'}
         </div>
+
+        {!tournamentFinished && secondsRemaining != null && (
+          <div style={{
+            background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)',
+            borderRadius: 8, padding: '6px 10px', marginBottom: 16,
+            color: '#fbbf24', fontSize: 13, fontWeight: 700,
+          }}>
+            Rebuy decision: {secondsRemaining}s
+          </div>
+        )}
 
         {error && (
           <div style={{
@@ -1206,10 +1217,15 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [breakInfo, setBreakInfo]        = useState<BreakDisplayInfo | null>(null)
   const [breakCountdownDisplay, setBreakCountdownDisplay] = useState<number>(0)
   const [breakDurationDisplay, setBreakDurationDisplay] = useState<number>(0)
-  const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' } | null>(null)
+  const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' | 'rebuy_timeout' } | null>(null)
   const [sitGoStartCountdown, setSitGoStartCountdown] = useState<number | null>(null)
   const [rebuyPending, setRebuyPending]  = useState(false)
   const [rebuyError, setRebuyError]      = useState<string | null>(null)
+  // Sit & Go rebuy/leave decision window — server-controlled (see
+  // sit_go_rebuy_update), not a client-only timer, so it survives refresh/
+  // reconnect with the correct remaining time.
+  const [sitGoRebuyPendingIds, setSitGoRebuyPendingIds] = useState<string[]>([])
+  const [sitGoRebuySecondsLeft, setSitGoRebuySecondsLeft] = useState<number | null>(null)
   const [lastHandsRemaining, setLastHandsRemaining] = useState<number | null>(null)
   const [lastHandsToasts, setLastHandsToasts] = useState<LastHandsToast[]>([])
   const [muted, setMuted]                = useState(false)
@@ -1237,6 +1253,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
 
   const nextHandTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null)
   const sitGoStartTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const sitGoRebuyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const socketRef          = useRef<AppSocket | null>(null)
   const prevShowdownRef    = useRef<ShowdownPayload | null>(null)
   const sessionRef         = useRef<SessionInfo | null>(null)
@@ -1297,6 +1314,14 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const amIEliminated = state.gameMode === 'sit_go'
     && state.seats.some(s => s.playerId === currentUserId && s.eliminated)
   const sitGoTournamentFinished = state.sitGoStatus === 'finished'
+
+  // Other players (and spectators) see a "waiting" message instead of the
+  // eliminated player's own modal+countdown — server-controlled, so it's
+  // accurate on refresh/reconnect too (see sit_go_rebuy_update).
+  const sitGoRebuyWaitingForOthers = sitGoRebuyPendingIds.length > 0 && !amIEliminated
+  const sitGoRebuyWaitingMessage = sitGoRebuyPendingIds.length > 0
+    ? `Waiting for eliminated ${sitGoRebuyPendingIds.length > 1 ? 'players' : 'player'} to choose Rebuy or Leave${sitGoRebuySecondsLeft != null ? ` — ${sitGoRebuySecondsLeft}s` : ''}`
+    : ''
 
   // Can I afford to call? If not, only all-in or fold is possible.
   const mustGoAllIn = !canCheck && callAmt > myStack
@@ -1908,10 +1933,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         }, 4000)
       }
 
-      const onKickedFromTable = (p: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' }) => {
+      const onKickedFromTable = (p: { tableId: string; reason: 'out_of_chips' | 'admin_kicked' | 'rebuy_timeout' }) => {
         if (!active || p.tableId !== initialState.tableId) return
         const msg = p.reason === 'out_of_chips'
           ? 'Hard luck! You ran out of chips.'
+          : p.reason === 'rebuy_timeout'
+          ? "Time's up — you didn't choose in time, so you've been moved to the lobby."
           : 'You were removed by an admin.'
         const showOverlayAndRedirect = () => {
           if (!active) return
@@ -1926,6 +1953,24 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         } else {
           showOverlayAndRedirect()
         }
+      }
+
+      const onSitGoRebuyUpdate = (p: { tableId: string; pendingPlayerIds: string[]; secondsRemaining: number }) => {
+        if (!active || p.tableId !== initialState.tableId) return
+        if (sitGoRebuyTimerRef.current) { clearInterval(sitGoRebuyTimerRef.current); sitGoRebuyTimerRef.current = null }
+        setSitGoRebuyPendingIds(p.pendingPlayerIds)
+        if (p.pendingPlayerIds.length === 0) {
+          setSitGoRebuySecondsLeft(null)
+          return
+        }
+        setSitGoRebuySecondsLeft(p.secondsRemaining)
+        const id = setInterval(() => {
+          setSitGoRebuySecondsLeft(prev => {
+            if (prev === null || prev <= 1) { clearInterval(id); sitGoRebuyTimerRef.current = null; return 0 }
+            return prev - 1
+          })
+        }, 1000)
+        sitGoRebuyTimerRef.current = id
       }
 
       const onReactionSent = (p: { tableId: string; fromPlayerId: string; toPlayerId: string; reactionType: ReactionType }) => {
@@ -1975,6 +2020,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('last_hands_update', onLastHandsUpdate)
       socket.on('last_hands_announcement', onLastHandsAnnouncement)
       socket.on('kicked_from_table', onKickedFromTable)
+      socket.on('sit_go_rebuy_update', onSitGoRebuyUpdate)
       socket.on('table_chat_message', onChatMessage)
       socket.on('reaction_sent', onReactionSent)
 
@@ -1994,10 +2040,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('session_update', onSessionUpdate); socket.off('break_update', onBreakUpdate)
         socket.off('last_hands_update', onLastHandsUpdate); socket.off('last_hands_announcement', onLastHandsAnnouncement)
         socket.off('kicked_from_table', onKickedFromTable)
+        socket.off('sit_go_rebuy_update', onSitGoRebuyUpdate)
         socket.off('table_chat_message', onChatMessage)
         socket.off('reaction_sent', onReactionSent)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
         if (sitGoStartTimerRef.current) { clearInterval(sitGoStartTimerRef.current); sitGoStartTimerRef.current = null }
+        if (sitGoRebuyTimerRef.current) { clearInterval(sitGoRebuyTimerRef.current); sitGoRebuyTimerRef.current = null }
         if (kickedOverlayTimerRef.current) { clearTimeout(kickedOverlayTimerRef.current); kickedOverlayTimerRef.current = null }
         heroCardTimersRef.current.forEach(clearTimeout); heroCardTimersRef.current = []
         seatAnimTimersRef.current.forEach(clearTimeout); seatAnimTimersRef.current = []
@@ -2307,6 +2355,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           buyIn={state.buyIn}
           pending={rebuyPending || leaving}
           error={rebuyError}
+          secondsRemaining={sitGoRebuyPendingIds.includes(currentUserId) ? sitGoRebuySecondsLeft : null}
           onLeave={handleLeave}
           onRebuy={handleRebuy}
         />
@@ -2408,6 +2457,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           {sitGoStartCountdown != null && !hand && (
             <span style={{ background: 'rgba(16,185,129,0.18)', color: '#6ee7b7', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4 }}>
               Game starts in {sitGoStartCountdown}s
+            </span>
+          )}
+          {sitGoRebuyWaitingForOthers && !hand && (
+            <span style={{ background: 'rgba(245,158,11,0.15)', color: '#fbbf24', fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 4 }}>
+              {sitGoRebuyWaitingMessage}
             </span>
           )}
           {(showdownResult || prevHandResult) && (
@@ -3842,9 +3896,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                       )}
 
                       {!hand && !canStart && !showdownResult && myStatus === 'seated' && (
-                        <p style={{ color: sitGoStartCountdown != null ? '#6ee7b7' : '#475569', fontSize: sitGoStartCountdown != null ? 14 : 12, fontWeight: sitGoStartCountdown != null ? 700 : 400 }}>
+                        <p style={{ color: sitGoStartCountdown != null || sitGoRebuyWaitingForOthers ? '#6ee7b7' : '#475569', fontSize: sitGoStartCountdown != null || sitGoRebuyWaitingForOthers ? 14 : 12, fontWeight: sitGoStartCountdown != null || sitGoRebuyWaitingForOthers ? 700 : 400 }}>
                           {sitGoStartCountdown != null
                             ? `Game starts in ${sitGoStartCountdown}s`
+                            : sitGoRebuyWaitingForOthers
+                            ? sitGoRebuyWaitingMessage
                             : breakActive
                             ? `Break time — resumes in ${formatSessionTime(breakDurationDisplay)}`
                             : breakPendingHandEnd

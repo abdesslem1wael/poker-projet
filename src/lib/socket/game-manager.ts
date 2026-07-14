@@ -101,6 +101,10 @@ export class GameManager {
     // sit_go_registrations.current_stack) instead of the wallets table —
     // cash games omit this and keep the existing wallet-backed behavior.
     stackOverrides?: Map<string, number>,
+    // Automatic rake only applies to cash games — a Sit & Go's house fee is
+    // already taken out of the buy-in at registration (see register_sit_go),
+    // so skimming from pots on top of that would double-charge players.
+    rakeEnabled: boolean = true,
   ): Promise<{ ok: true } | { error: string }> {
     if (seatedPlayers.length < 2) {
       return { error: 'Need at least 2 seated players to start a hand' }
@@ -217,6 +221,7 @@ export class GameManager {
       currentActorIndex: actorIdx,
       tipPool: 0,
       voluntaryRaiseLevel: 0,
+      rakeEnabled,
     }
 
     game.dealerSeatNumber = dealerSeatNumber
@@ -438,14 +443,19 @@ export class GameManager {
   // ── Private helpers ───────────────────────────────────────────────────────
 
   // Settle the current voluntary raise level: if ≥ 2 players have contributed
-  // exactly the raise level, add 3.8% of (level × count) to tipPool.
+  // exactly the raise level, add 3.8% of (level × count) to tipPool. Never
+  // accumulates for Sit & Go hands (rakeEnabled false) — their house fee was
+  // already taken out of the buy-in, so this stays genuinely 0, not just
+  // zeroed out downstream at showdown.
   // Must be called BEFORE the acting player's roundContribution is updated.
   private settleTipForRound(state: HandState): void {
     if (state.voluntaryRaiseLevel <= 0) return
     const level = state.voluntaryRaiseLevel
-    const count = state.players.filter(p => p.roundContribution === level).length
-    if (count >= 2) {
-      state.tipPool += Math.floor(0.038 * level * count)
+    if (state.rakeEnabled) {
+      const count = state.players.filter(p => p.roundContribution === level).length
+      if (count >= 2) {
+        state.tipPool += Math.floor(0.038 * level * count)
+      }
     }
     state.voluntaryRaiseLevel = 0
   }

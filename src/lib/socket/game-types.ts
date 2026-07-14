@@ -34,6 +34,7 @@ export interface HandState {
   currentActorIndex: number   // index into players[]; -1 when nobody to act
   tipPool: number             // accumulated automatic tips for this hand
   voluntaryRaiseLevel: number // last voluntary raise level for tip tracking (0 = none yet)
+  rakeEnabled: boolean        // false for Sit & Go — the house fee is already taken from the buy-in
 }
 
 export interface TableGame {

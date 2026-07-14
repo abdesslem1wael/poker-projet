@@ -13,12 +13,16 @@ import {
   leaveTable,
   cleanupTableSeats,
   seatAllSitGoRegistrants,
+  getSeatedPlayerCount,
+  isSitGoFullySeated,
+  syncSitGoBlindLevel,
 } from './src/lib/socket/table-session'
 import { GameManager } from './src/lib/socket/game-manager'
 import { SessionManager } from './src/lib/socket/session-manager'
 import { DisconnectedSeatTracker, partitionByConnection } from './src/lib/socket/seat-policy'
 import { BreakManager, BREAK_COUNTDOWN_MS, BREAK_DURATION_MS } from './src/lib/socket/break-manager'
 import { LastHandsManager } from './src/lib/socket/last-hands-manager'
+import { SitGoRebuyManager, SIT_GO_REBUY_DECISION_MS } from './src/lib/socket/sitgo-rebuy-manager'
 import { computeShowdown } from './src/lib/socket/showdown-helper'
 import type { HandEndedData } from './src/lib/socket/game-types'
 import type {
@@ -42,6 +46,7 @@ const gm = new GameManager()
 const sm = new SessionManager()
 const bm = new BreakManager()
 const lhm = new LastHandsManager()
+const rebuyMgr = new SitGoRebuyManager()
 
 // ── Module-level helpers ───────────────────────────────────────────────────
 
@@ -135,6 +140,7 @@ async function persistHandResult(supabase: any, data: HandEndedData, showdown: S
 type SitGoEliminationResult = {
   tournamentFinished: boolean
   payout?: { winnerId: string; newChips: number }
+  eliminatedIds: string[]  // players newly busted by THIS hand (empty if none)
 }
 
 // Marks any Sit & Go registration that just busted (current_stack already
@@ -149,7 +155,7 @@ async function handleSitGoElimination(supabase: any, tableId: string, showdown: 
   if (eliminatedIds.length > 0) {
     const { error } = await supabase
       .from('sit_go_registrations')
-      .update({ status: 'eliminated' })
+      .update({ status: 'eliminated', eliminated_at: new Date().toISOString() })
       .eq('table_id', tableId)
       .in('player_id', eliminatedIds)
       .eq('status', 'registered')
@@ -165,7 +171,7 @@ async function handleSitGoElimination(supabase: any, tableId: string, showdown: 
   const regs = (regRows as Array<{ player_id: string; status: string; current_stack: number }> | null) ?? []
   const remaining = regs.filter(r => r.status === 'registered' && r.current_stack > 0)
 
-  if (remaining.length > 1) return { tournamentFinished: false }
+  if (remaining.length > 1) return { tournamentFinished: false, eliminatedIds }
 
   // Guarded on the current value so only the first hand to detect the finish
   // actually flips it — a second call (should never happen; hands are
@@ -181,7 +187,7 @@ async function handleSitGoElimination(supabase: any, tableId: string, showdown: 
   const finishedRow = ((finishedRows as Array<{ prize_pool: number; name: string }> | null) ?? [])[0]
   if (!finishedRow) {
     // Already finished by an earlier hand — payout (if any) already happened.
-    return { tournamentFinished: true }
+    return { tournamentFinished: true, eliminatedIds }
   }
 
   console.log(`[sitgo] tournament finished  table=${tableId} remaining=${remaining.length}`)
@@ -190,14 +196,14 @@ async function handleSitGoElimination(supabase: any, tableId: string, showdown: 
     // Chip-conservation makes this practically unreachable (someone always
     // holds the chips that were in play), but never guess at a winner.
     console.error(`[sitgo] finished with ${remaining.length} eligible winners — skipping payout  table=${tableId}`)
-    return { tournamentFinished: true }
+    return { tournamentFinished: true, eliminatedIds }
   }
 
   const winnerId = remaining[0].player_id
   const prizePool = finishedRow.prize_pool
 
   if (!prizePool || prizePool <= 0) {
-    return { tournamentFinished: true }
+    return { tournamentFinished: true, eliminatedIds }
   }
 
   // Guarded the same way — only the transition to 'winner' actually pays.
@@ -211,7 +217,7 @@ async function handleSitGoElimination(supabase: any, tableId: string, showdown: 
 
   if (!((winnerRows as Array<{ id: string }> | null) ?? []).length) {
     console.log(`[sitgo] winner already paid  table=${tableId} winner=${winnerId}`)
-    return { tournamentFinished: true }
+    return { tournamentFinished: true, eliminatedIds }
   }
 
   const { data: walletRow } = await supabase
@@ -230,7 +236,7 @@ async function handleSitGoElimination(supabase: any, tableId: string, showdown: 
 
   if (walletErr) {
     console.error(`[sitgo] prize payout wallet update failed  table=${tableId} winner=${winnerId}`, walletErr)
-    return { tournamentFinished: true }
+    return { tournamentFinished: true, eliminatedIds }
   }
 
   const { error: txError } = await supabase.from('transactions').insert({
@@ -243,49 +249,7 @@ async function handleSitGoElimination(supabase: any, tableId: string, showdown: 
 
   console.log(`[sitgo] paid prize pool  table=${tableId} winner=${winnerId} amount=${prizePool}`)
 
-  return { tournamentFinished: true, payout: { winnerId, newChips } }
-}
-
-// Hand-based blind levels for Sit & Go tables (Step 6). small_blind/big_blind
-// on poker_tables are treated as the CURRENT blinds — doStartHand() already
-// reads them fresh at the start of every hand, so bumping them here is all
-// that's needed; no change to GameManager or the hand-dealing flow.
-// Multiplier schedule is 1-indexed by level (index 0 = level 1, unused level 0).
-const SIT_GO_BLIND_MULTIPLIERS = [1, 2, 3, 5, 8, 12, 20]
-const SIT_GO_HANDS_PER_LEVEL = 5
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function advanceSitGoBlinds(supabase: any, tableId: string): Promise<void> {
-  const { data: tableRow } = await supabase
-    .from('poker_tables')
-    .select('sit_go_hands_completed, blind_level, original_small_blind, original_big_blind')
-    .eq('id', tableId)
-    .single()
-
-  if (!tableRow) return
-  const row = tableRow as {
-    sit_go_hands_completed: number
-    blind_level: number
-    original_small_blind: number | null
-    original_big_blind: number | null
-  }
-
-  const handsCompleted = row.sit_go_hands_completed + 1
-  const maxLevel = SIT_GO_BLIND_MULTIPLIERS.length
-  const newLevel = Math.min(Math.floor(handsCompleted / SIT_GO_HANDS_PER_LEVEL) + 1, maxLevel)
-
-  const update: Record<string, unknown> = { sit_go_hands_completed: handsCompleted }
-
-  if (newLevel !== row.blind_level && row.original_small_blind && row.original_big_blind) {
-    const multiplier = SIT_GO_BLIND_MULTIPLIERS[newLevel - 1]
-    update.blind_level = newLevel
-    update.small_blind = row.original_small_blind * multiplier
-    update.big_blind = row.original_big_blind * multiplier
-    console.log(`[sitgo] blind level up  table=${tableId} level=${newLevel} blinds=${update.small_blind}/${update.big_blind}`)
-  }
-
-  const { error } = await supabase.from('poker_tables').update(update).eq('id', tableId)
-  if (error) console.error(`[sitgo] blind level update failed  table=${tableId}`, error)
+  return { tournamentFinished: true, payout: { winnerId, newChips }, eliminatedIds }
 }
 
 nextApp.prepare().then(async () => {
@@ -461,6 +425,7 @@ nextApp.prepare().then(async () => {
     }
 
     let tournamentFinished = false
+    let newlyEliminatedIds: string[] = []
     let brokePlayers: typeof showdown.players = []
 
     if (isSitGo) {
@@ -471,6 +436,7 @@ nextApp.prepare().then(async () => {
       try {
         const result = await handleSitGoElimination(supabase, tableId, showdown)
         tournamentFinished = result.tournamentFinished
+        newlyEliminatedIds = result.eliminatedIds
         if (result.payout) {
           const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
           for (const s of roomSockets) {
@@ -483,16 +449,6 @@ nextApp.prepare().then(async () => {
         console.error('[game] Sit & Go elimination check failed:', err)
       }
 
-      // Blind levels only advance for hands that complete a still-running
-      // tournament — never mid-hand (this runs after showdown) and never
-      // once the tournament has finished.
-      if (!tournamentFinished) {
-        try {
-          await advanceSitGoBlinds(supabase, tableId)
-        } catch (err) {
-          console.error('[game] Sit & Go blind level advance failed:', err)
-        }
-      }
     } else {
       // Cash games: mark broke players' seats 'left' immediately (never rely on
       // the wallet re-read in doStartHand, which would miss a failed wallet
@@ -578,6 +534,10 @@ nextApp.prepare().then(async () => {
 
     if (lastHandsClosedTable) {
       console.log(`[last-hands] no further hands — table closed  table=${tableId}`)
+    } else if (!tournamentFinished && newlyEliminatedIds.length > 0) {
+      // Pause here — the next hand starts only once every player eliminated
+      // by this hand has rebought, left, or their decision window times out.
+      await startSitGoRebuyDecisions(tableId, newlyEliminatedIds)
     } else if (!tournamentFinished) {
       scheduleAutoStart(tableId)
     } else {
@@ -674,8 +634,14 @@ nextApp.prepare().then(async () => {
     }
   }
 
-  async function doStartHand(tableId: string): Promise<null | 'too_few' | 'failed' | 'session_expired' | 'on_break'> {
+  async function doStartHand(tableId: string): Promise<null | 'too_few' | 'failed' | 'session_expired' | 'on_break' | 'awaiting_rebuy_decisions'> {
     if (gm.hasActiveHand(tableId)) return 'failed'
+
+    // Defense in depth: the normal path never calls scheduleAutoStart while
+    // a Sit & Go rebuy/leave decision is pending (see handleHandEnd), but
+    // this blocks the next hand outright even if something else ever tries
+    // to start one directly.
+    if (rebuyMgr.hasPending(tableId)) return 'awaiting_rebuy_decisions'
 
     // Block new hands when the session has expired.
     if (sm.isActive(tableId) && sm.isExpired(tableId)) return 'session_expired'
@@ -683,6 +649,12 @@ nextApp.prepare().then(async () => {
     // Block new hands once the break has moved past the "still playing" countdown phase.
     const breakPhase = bm.get(tableId)?.phase
     if (breakPhase === 'awaiting_hand_end' || breakPhase === 'active') return 'on_break'
+
+    // Sync the Sit & Go blind level from elapsed wall-clock time before
+    // reading small_blind/big_blind below, so this hand always deals at the
+    // current level even if the 5s periodic sweep hasn't ticked yet. No-op
+    // for cash tables and for a Sit & Go whose level hasn't advanced.
+    await syncSitGoBlindLevel(supabase, tableId)
 
     const { data: tableData } = await supabase
       .from('poker_tables')
@@ -801,12 +773,20 @@ nextApp.prepare().then(async () => {
       if (allSeated.length < 2) return 'too_few'
     }
 
-    const result = await gm.startHand(tableId, allSeated, supabase, small_blind, big_blind, stackOverrides)
+    // Auto rake is a cash-games-only mechanic — a Sit & Go's house fee is
+    // already taken out of the buy-in at registration (see register_sit_go),
+    // so raking pots on top of that would double-charge players.
+    const result = await gm.startHand(tableId, allSeated, supabase, small_blind, big_blind, stackOverrides, game_mode !== 'sit_go')
     if ('error' in result) return 'failed'
 
-    // Start the 1-hour session on the very first hand — timer tables only.
-    // Open tables have no time limit so they never get a session.
-    if (table_type !== 'open' && !sm.isActive(tableId)) {
+    // Start the 1-hour session on the very first hand — timer *cash* tables
+    // only. Open tables have no time limit so they never get a session, and
+    // Sit & Go tables never get one either regardless of table_type: the
+    // create-table form always submits table_type 'timer' for Sit & Go (its
+    // type selector only renders for cash games), but a tournament's end is
+    // decided entirely by tournament logic (elimination down to one player),
+    // never by a wall-clock session timer.
+    if (game_mode !== 'sit_go' && table_type !== 'open' && !sm.isActive(tableId)) {
       sm.startSession(tableId, tableName, table_type)
       emitSessionUpdate(tableId)
       console.log(`[session] started  table=${tableId}`)
@@ -874,6 +854,157 @@ nextApp.prepare().then(async () => {
     autoStartTimers.set(tableId, t)
   }
 
+  // ── Sit & Go rebuy/leave decision window ──────────────────────────────────
+  // When a hand busts one or more registered Sit & Go players and the
+  // tournament isn't over, the next hand is paused — scheduleAutoStart is
+  // never called — until every one of them has rebought, left, or their own
+  // 65s decision window has elapsed (handleHandEnd calls
+  // startSitGoRebuyDecisions() instead of scheduleAutoStart() when that
+  // happens). Cash games never touch any of this.
+  //
+  // The deadline is persisted to sit_go_registrations.rebuy_decision_deadline
+  // (DB write happens BEFORE the in-memory manager/timer are armed) so a
+  // restart mid-decision — a Railway deploy, a crash — never loses it:
+  // rehydrateSitGoRebuyDecisions() below reloads every still-open window at
+  // boot and re-arms its timer with the correct remaining time. Without this,
+  // a forgotten decision would leave the tournament paused forever, since the
+  // only thing that ever calls scheduleAutoStart again is the resolve
+  // callback for a decision the process would no longer know about.
+  const sitGoRebuyTimers = new Map<string, NodeJS.Timeout>()  // `${tableId}:${playerId}` -> timer
+
+  function emitSitGoRebuyUpdate(tableId: string): void {
+    io.to(`table:${tableId}`).emit('sit_go_rebuy_update', rebuyMgr.toPayload(tableId))
+  }
+
+  // Arms (or re-arms) one player's decision timer for an already-known
+  // deadline. Shared by the fresh-elimination path and boot-time rehydration
+  // — `delay` is clamped to 0 when the deadline has already passed (e.g. the
+  // server was down longer than the remaining window), which fires the
+  // timeout on the next tick instead of needing a separate "already expired" branch.
+  function armSitGoRebuyTimer(tableId: string, playerId: string, deadline: number): void {
+    const key = `${tableId}:${playerId}`
+    const existing = sitGoRebuyTimers.get(key)
+    if (existing !== undefined) clearTimeout(existing)
+
+    const delay = Math.max(0, deadline - Date.now())
+    const t = setTimeout(() => {
+      sitGoRebuyTimers.delete(key)
+      void handleSitGoRebuyTimeout(tableId, playerId)
+        .catch(err => console.error('[sitgo] rebuy timeout crashed:', err))
+    }, delay)
+    sitGoRebuyTimers.set(key, t)
+  }
+
+  async function startSitGoRebuyDecisions(tableId: string, playerIds: string[]): Promise<void> {
+    const deadline = Date.now() + SIT_GO_REBUY_DECISION_MS
+
+    // Persist first — if the process dies right after this point, rehydration
+    // on the next boot still has the correct deadline.
+    const { error } = await supabase
+      .from('sit_go_registrations')
+      .update({ rebuy_decision_deadline: new Date(deadline).toISOString() })
+      .eq('table_id', tableId)
+      .in('player_id', playerIds)
+      .eq('status', 'eliminated')
+    if (error) console.error(`[sitgo] failed to persist rebuy decision deadline  table=${tableId}`, error)
+
+    rebuyMgr.start(tableId, playerIds, deadline)
+    emitSitGoRebuyUpdate(tableId)
+    console.log(`[sitgo] rebuy decision window started  table=${tableId} players=${playerIds.join(', ')}`)
+
+    for (const playerId of playerIds) {
+      armSitGoRebuyTimer(tableId, playerId, deadline)
+    }
+  }
+
+  // Resolves one player's pending decision (rebought, left, or timed out) —
+  // called from rebuySitGoAction (via the global bridge), from leave_table
+  // below, from kick_player, and from handleSitGoRebuyTimeout. Once every
+  // player from that hand's elimination batch has resolved, the next hand is
+  // finally allowed to proceed. Safe to call redundantly (e.g. a stale timer
+  // firing after the player already rebought) — SitGoRebuyManager.resolve()
+  // is a no-op then, and the DB deadline is only cleared when it was actually
+  // still pending, so this never re-clears an already-clean row.
+  async function resolveSitGoRebuyDecision(tableId: string, playerId: string): Promise<void> {
+    const key = `${tableId}:${playerId}`
+    const timer = sitGoRebuyTimers.get(key)
+    if (timer !== undefined) { clearTimeout(timer); sitGoRebuyTimers.delete(key) }
+
+    const wasPending = rebuyMgr.isPending(tableId, playerId)
+    const wasLast = rebuyMgr.resolve(tableId, playerId)
+
+    if (wasPending) {
+      // Critical for leave/timeout/admin-kick — unlike a rebuy, those never
+      // change sit_go_registrations.status away from 'eliminated', so a
+      // dangling deadline here would make rehydration wrongly resurrect this
+      // decision (and re-run the auto-leave) on every future restart.
+      const { error } = await supabase
+        .from('sit_go_registrations')
+        .update({ rebuy_decision_deadline: null })
+        .eq('table_id', tableId)
+        .eq('player_id', playerId)
+      if (error) console.error(`[sitgo] failed to clear rebuy decision deadline  table=${tableId} player=${playerId}`, error)
+    }
+
+    emitSitGoRebuyUpdate(tableId)
+
+    if (wasLast) {
+      console.log(`[sitgo] all rebuy decisions resolved — resuming  table=${tableId}`)
+      scheduleAutoStart(tableId)
+    }
+  }
+
+  // 65s elapse with no choice made: auto-treat it as Leave Table. Runs
+  // regardless of whether the player is currently connected — "redirect to
+  // lobby if possible" only applies if their socket happens to still be here.
+  async function handleSitGoRebuyTimeout(tableId: string, playerId: string): Promise<void> {
+    if (!rebuyMgr.isPending(tableId, playerId)) return  // already resolved
+
+    console.log(`[sitgo] rebuy decision timed out — auto-leaving  table=${tableId} player=${playerId}`)
+    await leaveTable(supabase, tableId, playerId)
+
+    const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
+    for (const s of roomSockets) {
+      if (s.data.userId === playerId) {
+        s.emit('kicked_from_table', { tableId, reason: 'rebuy_timeout' })
+        s.data.seatedAtTables.delete(tableId)
+        s.leave(`table:${tableId}`)
+      }
+    }
+
+    await resolveSitGoRebuyDecision(tableId, playerId)
+
+    const state = await buildTableState(supabase, tableId)
+    if (state) io.to(`table:${tableId}`).emit('table_state', state)
+  }
+
+  // Runs once at boot: reloads every Sit & Go rebuy/leave decision that was
+  // still open when the process last stopped, and re-arms its timer with
+  // whatever time actually remains (possibly none, if the process was down
+  // longer than the window — that just fires the timeout almost immediately,
+  // which is the correct outcome for "no choice was made by the deadline").
+  async function rehydrateSitGoRebuyDecisions(): Promise<void> {
+    const { data } = await supabase
+      .from('sit_go_registrations')
+      .select('table_id, player_id, rebuy_decision_deadline')
+      .eq('status', 'eliminated')
+      .not('rebuy_decision_deadline', 'is', null)
+
+    const rows = (data as Array<{ table_id: string; player_id: string; rebuy_decision_deadline: string }> | null) ?? []
+    if (rows.length === 0) return
+
+    const affectedTables = new Set<string>()
+    for (const row of rows) {
+      const deadline = new Date(row.rebuy_decision_deadline).getTime()
+      rebuyMgr.start(row.table_id, [row.player_id], deadline)
+      armSitGoRebuyTimer(row.table_id, row.player_id, deadline)
+      affectedTables.add(row.table_id)
+      console.log(`[sitgo] rehydrated pending rebuy decision  table=${row.table_id} player=${row.player_id} msRemaining=${deadline - Date.now()}`)
+    }
+
+    for (const tableId of affectedTables) emitSitGoRebuyUpdate(tableId)
+  }
+
   // ── Sit & Go auto-start ─────────────────────────────────────────────────────
   // Once registration fills a Sit & Go (sit_go_status 'ready', set atomically
   // by the register_sit_go RPC), every registered player is auto-seated and
@@ -883,7 +1014,20 @@ nextApp.prepare().then(async () => {
   const sitGoCountdownTimers = new Map<string, NodeJS.Timeout>()
   const sitGoCountdownStartedAt = new Map<string, number>()  // tableId → epoch ms
 
+  // Tables whose pre-first-hand countdown has already been launched at least
+  // once, in this process's lifetime. Checked before doing any further work
+  // for a table, and never removed — a Sit & Go table only ever goes through
+  // 'registering' → 'ready' → 'running' → 'finished' once (registerSitGoAction
+  // only writes 'registering' at table creation). Without this, the periodic
+  // sweep below would mistake the gap *between* hands for "not started yet":
+  // GameManager clears its in-memory hand state as soon as a hand ends, so
+  // gm.getPublicHandState(tableId) is null for the few seconds between every
+  // hand of an already-running tournament, not just before the first one.
+  const sitGoLaunched = new Set<string>()
+
   function startSitGoCountdown(tableId: string): void {
+    sitGoLaunched.add(tableId)
+
     const existing = sitGoCountdownTimers.get(tableId)
     if (existing !== undefined) { clearTimeout(existing); sitGoCountdownTimers.delete(tableId) }
 
@@ -904,16 +1048,20 @@ nextApp.prepare().then(async () => {
 
   // Tables currently being claimed/seated in this process — the immediate
   // trigger fired by registerSitGoAction and the 5s periodic sweep can both
-  // observe the same 'ready' table before either finishes; this skips a
-  // redundant attempt without even hitting the DB.
+  // observe the same 'ready'/'running'-but-not-yet-full table before either
+  // finishes; this skips a redundant attempt without even hitting the DB.
   const sitGoStartInFlight = new Set<string>()
 
-  // Claims a single 'ready' Sit & Go table: flips sit_go_status to 'running'
-  // (guarded so only one caller wins the race), bulk-seats every registrant,
-  // notifies registered players' sockets to navigate to the table, and
-  // starts the pre-first-hand countdown.
+  // Claims a 'ready' Sit & Go table (flips it to 'running', guarded so only
+  // one caller wins the race), bulk-seats every registrant, and — only once
+  // every registrant actually holds a real seat — notifies registered
+  // players' sockets to navigate to the table and starts the pre-first-hand
+  // countdown. Full registration alone is not enough to start the game: if
+  // seatAllSitGoRegistrants leaves anyone unseated this pass (it can, by
+  // design — see its own comments), this returns without starting anything,
+  // and the periodic sweep below retries until every seat is actually filled.
   async function startSitGoTournament(tableId: string): Promise<void> {
-    if (sitGoStartInFlight.has(tableId)) return
+    if (sitGoStartInFlight.has(tableId) || sitGoLaunched.has(tableId)) return
     sitGoStartInFlight.add(tableId)
     try {
       // Claim the transition FIRST, before touching table_players. This
@@ -922,28 +1070,42 @@ nextApp.prepare().then(async () => {
       // proceeds to seat players. Any other concurrent/duplicate caller —
       // this process's own periodic sweep, another process after a restart,
       // or the legacy manual-join flip in joinTable() — sees 0 affected rows
-      // and returns immediately without touching table_players at all. This
-      // is what actually prevents the double-seat race (seating used to run
-      // before this claim, so two concurrent callers could both seat the
-      // same players before either won the flip).
-      const { data: flippedRows } = await supabase
+      // here but still falls through to the seating/count check below, so a
+      // retry sweep for an already-'running'-but-not-yet-full table keeps
+      // making progress instead of being a no-op. sit_go_started_at is the
+      // blind clock's zero point (Level 1 starts the instant the Sit & Go
+      // runs) — the `eq('sit_go_status', 'ready')` guard means it's only
+      // ever written on this one true transition, never overwritten by a
+      // later retry pass.
+      await supabase
         .from('poker_tables')
-        .update({ sit_go_status: 'running' })
+        .update({ sit_go_status: 'running', sit_go_started_at: new Date().toISOString() })
         .eq('id', tableId)
         .eq('sit_go_status', 'ready')
-        .select('id')
 
-      if (!((flippedRows as Array<{ id: string }> | null) ?? []).length) return
+      const { data: tableRow } = await supabase
+        .from('poker_tables')
+        .select('sit_go_status, max_players')
+        .eq('id', tableId)
+        .single()
+      const table = tableRow as { sit_go_status: string; max_players: number } | null
 
-      console.log(`[sitgo] tournament starting  table=${tableId}`)
+      // Not actually running (still registering, or already finished/closed
+      // by the time we got here) — nothing for the auto-start flow to do.
+      if (!table || table.sit_go_status !== 'running') return
 
       await seatAllSitGoRegistrants(supabase, tableId)
 
+      const seatedCount = await getSeatedPlayerCount(supabase, tableId)
+
+      // Re-notify registered players and refresh table_state on every pass,
+      // not just the first: a registrant who wasn't seated yet last time
+      // (and was bounced back to the lobby) needs the same auto-redirect
+      // once this retry actually seats them.
       const { data: regRows } = await supabase
         .from('sit_go_registrations')
         .select('player_id')
         .eq('table_id', tableId)
-
       const registeredIds = new Set(
         ((regRows as Array<{ player_id: string }> | null) ?? []).map(r => r.player_id),
       )
@@ -955,24 +1117,60 @@ nextApp.prepare().then(async () => {
       const state = await buildTableState(supabase, tableId)
       if (state) io.to(`table:${tableId}`).emit('table_state', state)
 
-      startSitGoCountdown(tableId)
+      if (isSitGoFullySeated(seatedCount, table.max_players)) {
+        console.log(`[sitgo] all ${table.max_players} players seated — starting countdown  table=${tableId}`)
+        startSitGoCountdown(tableId)
+      } else {
+        console.log(`[sitgo] waiting for players  table=${tableId} seated=${seatedCount}/${table.max_players}`)
+      }
     } finally {
       sitGoStartInFlight.delete(tableId)
     }
   }
 
-  // Sweeps for any Sit & Go table stuck at 'ready' — the normal path is the
-  // immediate trigger fired by registerSitGoAction right after the last seat
-  // registers, but this backstop (called every 5s, see below) also covers a
-  // server restart mid-registration or a missed in-process trigger.
+  // Sweeps every running Sit & Go table's blind level forward from elapsed
+  // wall-clock time (see syncSitGoBlindLevel) and broadcasts table_state to
+  // anyone watching the instant a level actually changes — not just at the
+  // next hand's deal. This is what keeps a connected client's "Level N"
+  // display live without needing its own timer, and is also what a
+  // reconnecting player's table_state fetch is backed by, so refresh/
+  // reconnect always shows the correct current level.
+  async function checkSitGoBlindLevels(): Promise<void> {
+    const { data } = await supabase
+      .from('poker_tables')
+      .select('id')
+      .eq('game_mode', 'sit_go')
+      .eq('sit_go_status', 'running')
+
+    for (const row of (data as Array<{ id: string }> | null) ?? []) {
+      try {
+        const { changed } = await syncSitGoBlindLevel(supabase, row.id)
+        if (changed) {
+          const state = await buildTableState(supabase, row.id)
+          if (state) io.to(`table:${row.id}`).emit('table_state', state)
+        }
+      } catch (err) {
+        console.error(`[sitgo] blind level sync crashed  table=${row.id}`, err)
+      }
+    }
+  }
+
+  // Sweeps for any Sit & Go table that hasn't launched its countdown yet —
+  // 'ready' tables that haven't been claimed, and 'running' tables that were
+  // claimed but didn't finish seating everyone on a prior pass. The normal
+  // path is the immediate trigger fired by registerSitGoAction right after
+  // the last seat registers, but this backstop (called every 5s, see below)
+  // also covers a server restart mid-registration/mid-seating, or a missed
+  // in-process trigger.
   async function checkSitGoReadyTables(): Promise<void> {
     const { data } = await supabase
       .from('poker_tables')
       .select('id')
       .eq('game_mode', 'sit_go')
-      .eq('sit_go_status', 'ready')
+      .in('sit_go_status', ['ready', 'running'])
 
     for (const row of (data as Array<{ id: string }> | null) ?? []) {
+      if (sitGoLaunched.has(row.id)) continue
       try {
         await startSitGoTournament(row.id)
       } catch (err) {
@@ -997,6 +1195,14 @@ nextApp.prepare().then(async () => {
     void buildTableState(supabase, tableId)
       .then(state => { if (state) io.to(`table:${tableId}`).emit('table_state', state) })
       .catch(err => console.error(`[sitgo] table_state refresh crashed  table=${tableId}`, err))
+  }
+
+  // Exposed so rebuySitGoAction (a Server Action, different module graph)
+  // can resolve a player's pending rebuy/leave decision the moment their
+  // rebuy succeeds, instead of leaving them stuck until the 65s timeout.
+  ;(global as Record<string, unknown>).__triggerSitGoRebuyResolved = (tableId: string, playerId: string) => {
+    void resolveSitGoRebuyDecision(tableId, playerId)
+      .catch(err => console.error(`[sitgo] rebuy resolution crashed  table=${tableId} player=${playerId}`, err))
   }
 
   // ── Stale-seat cleanup ────────────────────────────────────────────────────
@@ -1179,6 +1385,14 @@ nextApp.prepare().then(async () => {
         const remaining = Math.max(1, Math.ceil((SIT_GO_COUNTDOWN_MS - elapsed) / 1000))
         socket.emit('sit_go_starting_countdown', { tableId, seconds: remaining })
       }
+
+      // Reconnect: resend the current Sit & Go rebuy/leave decision window
+      // (if any) with accurate remaining seconds — an eliminated player
+      // reconnecting mid-decision must see the correct time left, and other
+      // reconnecting players must still see the "waiting" state.
+      if (rebuyMgr.hasPending(tableId)) {
+        socket.emit('sit_go_rebuy_update', rebuyMgr.toPayload(tableId))
+      }
     })
 
     // ── spectate_table ─────────────────────────────────────────────────────
@@ -1205,6 +1419,10 @@ nextApp.prepare().then(async () => {
         socket.emit('sit_go_starting_countdown', { tableId, seconds: remaining })
       }
 
+      if (rebuyMgr.hasPending(tableId)) {
+        socket.emit('sit_go_rebuy_update', rebuyMgr.toPayload(tableId))
+      }
+
       socket.emit('break_update', bm.toPayload(tableId))
       // Reconnect: same DB-backed value as join_table, not the in-memory cache.
       socket.emit('last_hands_update', { tableId, remaining: state?.lastHandsRemaining ?? null })
@@ -1212,18 +1430,25 @@ nextApp.prepare().then(async () => {
 
     // ── leave_table ────────────────────────────────────────────────────────
     socket.on('leave_table', async ({ tableId }) => {
-      // A Sit & Go player already eliminated from the tournament isn't part
-      // of active/locked gameplay anymore, so the session/break locks below
-      // (which exist to keep active players seated) don't apply to them —
-      // they must always be able to leave for the lobby.
-      const { data: eliminatedRow } = await supabase
+      // A registered Sit & Go player is locked in until eliminated — that's
+      // tournament logic, not a timer, and Sit & Go tables never run the
+      // 1-hour session (see doStartHand) so there is no session lock to fall
+      // back on for them. An eliminated player isn't part of active/locked
+      // gameplay anymore and must always be able to leave for the lobby.
+      const { data: registrationRow } = await supabase
         .from('sit_go_registrations')
-        .select('id')
+        .select('status')
         .eq('table_id', tableId)
         .eq('player_id', userId)
-        .eq('status', 'eliminated')
         .maybeSingle()
-      const isEliminatedSitGoPlayer = eliminatedRow != null
+      const registrationStatus = (registrationRow as { status: string } | null)?.status ?? null
+      const isActiveSitGoPlayer = registrationStatus === 'registered'
+      const isEliminatedSitGoPlayer = registrationStatus === 'eliminated'
+
+      if (isActiveSitGoPlayer && socket.data.role !== 'admin') {
+        socket.emit('socket_error', { message: 'You cannot leave a Sit & Go while still in the tournament — you can leave once eliminated.' })
+        return
+      }
 
       // Block voluntary leaves while the session is running — 'open' tables never lock.
       if (sm.lockLeaving(tableId) && socket.data.role !== 'admin' && !isEliminatedSitGoPlayer) {
@@ -1244,6 +1469,13 @@ nextApp.prepare().then(async () => {
       socket.leave(`table:${tableId}`)
 
       socket.emit('table_left', { tableId })
+
+      // If this eliminated player had a pending rebuy/leave decision, this
+      // resolves it — clearing their timer and, if they were the last one
+      // pending, letting the next hand proceed.
+      if (isEliminatedSitGoPlayer) {
+        await resolveSitGoRebuyDecision(tableId, userId)
+      }
 
       const state = await buildTableState(supabase, tableId)
       if (state) io.to(`table:${tableId}`).emit('table_state', state)
@@ -1617,6 +1849,10 @@ nextApp.prepare().then(async () => {
       }
       await leaveTable(supabase, tableId, playerId)
       disconnectedSeats.clear(tableId, playerId)
+      // An admin-kicked player can no longer make a rebuy/leave choice —
+      // resolve it now so the table doesn't sit paused waiting on someone
+      // who's already gone.
+      await resolveSitGoRebuyDecision(tableId, playerId)
       // Notify and eject the kicked player's sockets.
       const roomSockets = await io.in(`table:${tableId}`).fetchSockets()
       for (const s of roomSockets) {
@@ -1677,7 +1913,13 @@ nextApp.prepare().then(async () => {
       emitBreakUpdate(brk.tableId)
     }
     void checkSitGoReadyTables().catch(err => console.error('[sitgo] periodic check crashed:', err))
+    void checkSitGoBlindLevels().catch(err => console.error('[sitgo] periodic blind check crashed:', err))
   }, 5_000)
+
+  // Reload any Sit & Go rebuy/leave decisions that were still open when this
+  // process last stopped, before accepting connections — see
+  // rehydrateSitGoRebuyDecisions() for why this matters on a restart.
+  await rehydrateSitGoRebuyDecisions().catch(err => console.error('[sitgo] rebuy decision rehydration crashed:', err))
 
   httpServer.listen(port, hostname, () => {
     console.log(
