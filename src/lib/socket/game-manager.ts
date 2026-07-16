@@ -443,7 +443,7 @@ export class GameManager {
   // ── Private helpers ───────────────────────────────────────────────────────
 
   // Settle the current voluntary raise level: if ≥ 2 players have contributed
-  // exactly the raise level, add 3% of (level × count) to tipPool. Never
+  // exactly the raise level, add 3.87% of (level × count) to tipPool. Never
   // accumulates for Sit & Go hands (rakeEnabled false) — their house fee was
   // already taken out of the buy-in, so this stays genuinely 0, not just
   // zeroed out downstream at showdown.
@@ -454,7 +454,7 @@ export class GameManager {
     if (state.rakeEnabled) {
       const count = state.players.filter(p => p.roundContribution === level).length
       if (count >= 2) {
-        state.tipPool += Math.floor(0.03 * level * count)
+        state.tipPool += Math.floor(0.0387 * level * count)
       }
     }
     state.voluntaryRaiseLevel = 0
