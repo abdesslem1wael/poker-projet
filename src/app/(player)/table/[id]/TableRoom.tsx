@@ -261,13 +261,22 @@ function mobileSeatVars(vs: number, max: number): React.CSSProperties {
   return { '--mleft': `${slot.left}%`, '--mtop': `${slot.top}%`, '--mty': mty } as React.CSSProperties
 }
 
-// Bet chips sit between the seat and the pot — interpolate the preset
-// coordinate toward the table centre rather than maintaining a second table.
-function mobileChipVars(vs: number, max: number): React.CSSProperties {
-  const slot = mobileSeatSlot(vs, max)
-  const left = 50 + (slot.left - 50) * 0.55
-  const top  = 50 + (slot.top - 50) * 0.55
-  return { '--mleft': `${left.toFixed(1)}%`, '--mtop': `${top.toFixed(1)}%` } as React.CSSProperties
+// Bet chips sit between the seat and the pot, on mobile-landscape — hand-tuned
+// per visual seat (2..9; seat 1/hero's chip is laid out inline, not by X/Y).
+const seatBetChipPositions: Record<number, { left: number; top: number }> = {
+  2: { left: 32.5, top: 70.5 },
+  3: { left: 18, top: 71.5 },
+  4: { left: 21.5, top: 45.5 },
+  5: { left: 36, top: 35.5 },
+  6: { left: 53.5, top: 31 },
+  7: { left: 70.5, top: 43 },
+  8: { left: 83.5, top: 58.3 },
+  9: { left: 69.5, top: 77 },
+}
+
+function mobileChipVars(vs: number): React.CSSProperties {
+  const pos = seatBetChipPositions[vs]
+  return { '--mleft': `${pos.left}%`, '--mtop': `${pos.top}%` } as React.CSSProperties
 }
 
 // Opponent pod content (avatar/cards/pill) scales down as more seats are in
@@ -312,10 +321,41 @@ const CARD_DIMS: Record<CardSize, {
   hand:      { w: 64,  h: 90,  cornerRank: 15, cornerSuit: 12, centerFont: 40, pipFont: 15, r: 7, pad: 4   },
 }
 
-function PlayingCard({ c, size }: { c: Card; size: CardSize }) {
+type CardDims = typeof CARD_DIMS[CardSize]
+
+// `overrideDims`, when present, replaces CARD_DIMS[size] wholesale (all
+// proportional fields — corner rank/suit, center symbol, pips, radius —
+// scaled by the width ratio so text/pips stay legible at the new size).
+type CardSizeSpec = { w: number; h: number; gap: number }
+type CardSizeRole = 'hero' | 'opponent' | 'community' | 'revealed'
+
+// Hand-tuned mobile-landscape card sizes (replaces the CSS transform-scale
+// default for these 4 roles on mobile-landscape; desktop is untouched).
+const MOBILE_CARD_SIZES: Record<CardSizeRole, CardSizeSpec> = {
+  hero:      { w: 61, h: 81, gap: 6 },
+  opponent:  { w: 19, h: 32, gap: 2 },
+  community: { w: 69, h: 83, gap: 10 },
+  revealed:  { w: 42, h: 60, gap: 4 },
+}
+
+function scaledCardDims(base: CardDims, spec: CardSizeSpec | undefined): CardDims | undefined {
+  if (!spec) return undefined
+  const scale = spec.w / base.w
+  return {
+    w: spec.w, h: spec.h,
+    cornerRank: base.cornerRank * scale,
+    cornerSuit: base.cornerSuit * scale,
+    centerFont: base.centerFont * scale,
+    pipFont: base.pipFont * scale,
+    r: base.r * scale,
+    pad: base.pad * scale,
+  }
+}
+
+function PlayingCard({ c, size, overrideDims }: { c: Card; size: CardSize; overrideDims?: CardDims }) {
   const sym = SUIT_SYM[c.suit]
   const color = SUIT_COLOR[c.suit]
-  const d = CARD_DIMS[size]
+  const d = overrideDims ?? CARD_DIMS[size]
   const isFace = ['J', 'Q', 'K', 'A'].includes(c.rank)
   const pips = PIP_POSITIONS[c.rank]
 
@@ -391,8 +431,8 @@ function PlayingCard({ c, size }: { c: Card; size: CardSize }) {
 // CardBack
 // ─────────────────────────────────────────────────────────────────────────────
 
-function CardBack({ size }: { size: CardSize }) {
-  const d = CARD_DIMS[size]
+function CardBack({ size, overrideDims }: { size: CardSize; overrideDims?: CardDims }) {
+  const d = overrideDims ?? CARD_DIMS[size]
   return (
     <div style={{
       width: d.w, height: d.h, flexShrink: 0,
@@ -492,24 +532,29 @@ function MiniChip({ amount, size = 11 }: { amount: number; size?: number }) {
   return <PokerChip size={size} palette={chipColor(amount)} />
 }
 
-function ChipStack({ amount, showLabel = true, chipSize = 15 }: { amount: number; showLabel?: boolean; chipSize?: number }) {
+// Bet-chip piles ("raised chips on the table") render at 1.4x the original
+// scale — chipSize default 15→21 (2x, then dialed back 30%), layer offset
+// scaled to match. Callers that want the original in-hand/pot scale pass
+// chipSize explicitly.
+function ChipStack({ amount, showLabel = true, chipSize = 21 }: { amount: number; showLabel?: boolean; chipSize?: number }) {
   const palette = chipColor(amount)
   const layers = Math.min(5, Math.max(2, Math.floor(Math.log10(amount + 1))))
+  const layerOffset = chipSize / 7.5
   return (
     <div className="flex flex-col items-center">
-      <div style={{ position: 'relative', width: chipSize, height: chipSize + layers * 2 }}>
+      <div style={{ position: 'relative', width: chipSize, height: chipSize + layers * layerOffset }}>
         {Array.from({ length: layers }).map((_, i) => (
-          <div key={i} style={{ position: 'absolute', bottom: i * 2, left: 0 }}>
+          <div key={i} style={{ position: 'absolute', bottom: i * layerOffset, left: 0 }}>
             <PokerChip size={chipSize} palette={palette} />
           </div>
         ))}
       </div>
       {showLabel && (
         <span style={{
-          marginTop: 2,
+          marginTop: 4,
           background: 'rgba(0,0,0,0.8)',
-          color: '#fbbf24', fontSize: 8, fontWeight: 700,
-          padding: '1px 3px', borderRadius: 3, letterSpacing: '-0.3px', whiteSpace: 'nowrap',
+          color: '#fbbf24', fontSize: 16, fontWeight: 700,
+          padding: '2px 6px', borderRadius: 6, letterSpacing: '-0.3px', whiteSpace: 'nowrap',
         }}>
           {formatChipAmount(amount)}
         </span>
@@ -566,7 +611,7 @@ function ChipFlight({ flight, onDone }: { flight: ChipFlightData; onDone: (id: s
       zIndex: 45,
       pointerEvents: 'none',
     }}>
-      <ChipStack amount={flight.amount} chipSize={13} />
+      <ChipStack amount={flight.amount} chipSize={18} />
     </div>
   )
 }
@@ -1126,7 +1171,7 @@ function EliminationModal({
 // forces it off in production builds regardless of this flag.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const LAYOUT_PREVIEW_ENABLED    = false
+const LAYOUT_PREVIEW_ENABLED    = true
 const LAYOUT_PREVIEW_SEAT_COUNT = 9
 
 function buildLayoutPreview(seatCount: number, currentUserId: string): {
@@ -1149,21 +1194,22 @@ function buildLayoutPreview(seatCount: number, currentUserId: string): {
     username: i === 0 ? 'You' : `Bot ${i + 1}`,
     avatarId: null,
     eliminated: false,
+    sittingOut: false,
   }))
 
   const players: PublicPlayerHandState[] = seats.map((s, i) => ({
     playerId: s.playerId as string,
     seatNumber: s.seatNumber,
     stack: 8000 - i * 350,
-    roundContribution: i === 1 ? 100 : i === 2 ? 200 : 0,
-    totalContributed: i === 1 ? 100 : i === 2 ? 200 : 0,
+    roundContribution: 100 + i * 50,
+    totalContributed: 100 + i * 50,
     playerPhase: seatCount > 4 && i === 4 ? 'folded' : seatCount > 5 && i === 5 ? 'all-in' : 'active',
     hasActedThisRound: i !== 3 % seatCount,
   }))
 
   const hand: PublicHandState = {
     handNumber: 0,
-    phase: 'PRE_FLOP',
+    phase: 'RIVER',
     pot: 300,
     currentBet: 200,
     minRaise: 200,
@@ -1171,7 +1217,7 @@ function buildLayoutPreview(seatCount: number, currentUserId: string): {
     dealerSeatNumber: seats[seatCount - 1].seatNumber,
     smallBlindSeatNumber: seats[1].seatNumber,
     bigBlindSeatNumber: seats[2 % seatCount].seatNumber,
-    communityCards: [],
+    communityCards: [nextCard(), nextCard(), nextCard(), nextCard(), nextCard()],
     players,
   }
 
@@ -1251,6 +1297,20 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     initialState.handState?.communityCards.length ?? 0
   )
 
+  // Drives the hand-tuned MOBILE_CARD_SIZES swap-in for hero/opponent/community/
+  // revealed cards — mirrors the same breakpoint as the mobile-landscape CSS
+  // (max-height:500px, landscape) so JS and CSS agree on what counts as mobile.
+  const [mobileLandscape, setMobileLandscape] = useState(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const mql = window.matchMedia('(max-height:500px) and (orientation:landscape)')
+    setMobileLandscape(mql.matches)
+    const handler = (e: MediaQueryListEvent) => setMobileLandscape(e.matches)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [])
+
   const nextHandTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null)
   const sitGoStartTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const sitGoRebuyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -1291,6 +1351,13 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const effectiveHoleCards = layoutPreview ? layoutPreview.myHoleCards : myHoleCards
   const effectiveDealtSeats = layoutPreview ? new Set(layoutPreview.seats.map(s => s.seatNumber)) : dealtSeatNumbers
 
+  // Hero/opponent/community/revealed cards swap in the hand-tuned
+  // MOBILE_CARD_SIZES on mobile-landscape; desktop keeps plain CARD_DIMS[size].
+  const cardDimsFor = (role: CardSizeRole, size: CardSize): CardDims | undefined =>
+    mobileLandscape ? scaledCardDims(CARD_DIMS[size], MOBILE_CARD_SIZES[role]) : undefined
+  const cardGapFor = (role: CardSizeRole, fallback: number): number =>
+    mobileLandscape ? MOBILE_CARD_SIZES[role].gap : fallback
+
   const isMyTurn   = hand?.currentTurnPlayerId === currentUserId
   const myHP       = hand?.players.find(p => p.playerId === currentUserId)
   const callAmt    = isMyTurn ? Math.max(0, (hand?.currentBet ?? 0) - (myHP?.roundContribution ?? 0)) : 0
@@ -1314,6 +1381,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const amIEliminated = state.gameMode === 'sit_go'
     && state.seats.some(s => s.playerId === currentUserId && s.eliminated)
   const sitGoTournamentFinished = state.sitGoStatus === 'finished'
+
+  // Cash games only — true once a turn timeout has put me into sit-out/
+  // auto-action mode, until I click Rejoin (see rejoin_cash_game).
+  const mySittingOut = state.gameMode === 'cash'
+    && state.seats.some(s => s.playerId === currentUserId && s.sittingOut)
 
   // Other players (and spectators) see a "waiting" message instead of the
   // eliminated player's own modal+countdown — server-controlled, so it's
@@ -2071,6 +2143,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     }
     s.on('table_left', onLeft)
     s.emit('leave_table', { tableId: initialState.tableId })
+  }
+
+  function handleRejoin() {
+    socketRef.current?.emit('rejoin_cash_game', { tableId: initialState.tableId })
   }
 
   function handleRebuy() {
@@ -2888,20 +2964,23 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         </div>
                       </div>
 
-                      <div className="tbl-community-row" style={{ display: 'flex', gap: 6 }}>
+                      <div className="tbl-community-row" style={{ display: 'flex', gap: cardGapFor('community', 6) }}>
                         {hand.communityCards.slice(0, visibleCommunityCount).map((c, i) => (
                           <div key={`card-${i}`} style={{ animation: 'card-deal-in 0.28s ease-out' }}>
-                            <PlayingCard c={c} size="community" />
+                            <PlayingCard c={c} size="community" overrideDims={cardDimsFor('community', 'community')} />
                           </div>
                         ))}
-                        {Array.from({ length: 5 - visibleCommunityCount }).map((_, i) => (
-                          <div key={`empty-${visibleCommunityCount + i}`} style={{
-                            width: CARD_DIMS.community.w, height: CARD_DIMS.community.h,
-                            borderRadius: CARD_DIMS.community.r,
-                            border: '1.5px dashed rgba(255,255,255,0.22)', background: 'rgba(255,255,255,0.04)',
-                            boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
-                          }} />
-                        ))}
+                        {Array.from({ length: 5 - visibleCommunityCount }).map((_, i) => {
+                          const d = cardDimsFor('community', 'community') ?? CARD_DIMS.community
+                          return (
+                            <div key={`empty-${visibleCommunityCount + i}`} style={{
+                              width: d.w, height: d.h,
+                              borderRadius: d.r,
+                              border: '1.5px dashed rgba(255,255,255,0.22)', background: 'rgba(255,255,255,0.04)',
+                              boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.04)',
+                            }} />
+                          )
+                        })}
                       </div>
                     </>
                   )}
@@ -2909,10 +2988,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                   {/* At showdown keep the board visible in the center — the compact
                       WinnerToast (top-centre) and "Results" side panel carry the detail. */}
                   {!hand && showdownResult && showdownResult.communityCards.length > 0 && (
-                    <div className="tbl-community-row" style={{ display: 'flex', gap: 6 }}>
+                    <div className="tbl-community-row" style={{ display: 'flex', gap: cardGapFor('community', 6) }}>
                       {showdownResult.communityCards.map((c, i) => (
                         <div key={i} style={{ lineHeight: 0 }}>
-                          <PlayingCard c={c} size="community" />
+                          <PlayingCard c={c} size="community" overrideDims={cardDimsFor('community', 'community')} />
                         </div>
                       ))}
                     </div>
@@ -2955,7 +3034,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                   (showdownResult.pots[0]?.winners ?? []).includes(seat.playerId)
                 const showTmr  = isTurn && turnTimerInfo?.playerId === seat.playerId && timeLeft > 0
                 const lastAct  = seat.playerId ? lastActions[seat.playerId] : null
-                const dimmed   = folded || sdFolded || eliminated
+                const dimmed   = folded || sdFolded || eliminated || seat.sittingOut
 
                 // Fixed mobile-landscape preset class — pins the pod by its
                 // rail-side edge and orders its content (avatar/cards/pill)
@@ -2968,7 +3047,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         Driven by betPile (buffered), not hp directly, so it survives past hand-end
                         (hp becomes undefined) for as long as the final collect-to-pot flight runs. */}
                     {occ && betPile > 0 && vs !== 1 && (
-                      <div className="tbl-bet-chip" style={{ ...chipPos(vs, max), ...mobileChipVars(vs, max), position: 'absolute', zIndex: 10, pointerEvents: 'none' }}>
+                      <div className="tbl-bet-chip" style={{ ...chipPos(vs, max), ...mobileChipVars(vs), position: 'absolute', zIndex: 10, pointerEvents: 'none' }}>
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
                           {showBlindLabels && isSB && (
                             <span style={{ background: '#1d4ed8', color: 'white', fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, letterSpacing: '0.04em' }}>SB</span>
@@ -3034,33 +3113,34 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         const sideCardNode = !isHero ? (
                           hand && !folded && hp ? (
                             isMe && effectiveHoleCards ? (
-                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2 }}>
-                                <PlayingCard c={effectiveHoleCards[0]} size={oppCardSize} />
-                                <PlayingCard c={effectiveHoleCards[1]} size={oppCardSize} />
+                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: cardGapFor('opponent', 2) }}>
+                                <PlayingCard c={effectiveHoleCards[0]} size={oppCardSize} overrideDims={cardDimsFor('opponent', oppCardSize)} />
+                                <PlayingCard c={effectiveHoleCards[1]} size={oppCardSize} overrideDims={cardDimsFor('opponent', oppCardSize)} />
                               </div>
                             ) : !isMe && runoutCards ? (
-                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 4 }}>
-                                <PlayingCard c={runoutCards[0]} size={revealedCardSize} />
-                                <PlayingCard c={runoutCards[1]} size={revealedCardSize} />
+                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: cardGapFor('revealed', 4) }}>
+                                <PlayingCard c={runoutCards[0]} size={revealedCardSize} overrideDims={cardDimsFor('revealed', revealedCardSize)} />
+                                <PlayingCard c={runoutCards[1]} size={revealedCardSize} overrideDims={cardDimsFor('revealed', revealedCardSize)} />
                               </div>
                             ) : !isMe && effectiveDealtSeats.has(seat.seatNumber) ? (
-                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 2, animation: 'card-deal-in 0.3s ease-out' }}>
-                                <CardBack size={oppCardSize} />
-                                <CardBack size={oppCardSize} />
+                              <div className="tbl-opponent-cards" style={{ display: 'flex', gap: cardGapFor('opponent', 2), animation: 'card-deal-in 0.3s ease-out' }}>
+                                <CardBack size={oppCardSize} overrideDims={cardDimsFor('opponent', oppCardSize)} />
+                                <CardBack size={oppCardSize} overrideDims={cardDimsFor('opponent', oppCardSize)} />
                               </div>
                             ) : null
                           ) : (!hand && (sdP?.holeCards || shownCards) && !isMe) ? (
-                            <div className="tbl-opponent-cards" style={{ display: 'flex', gap: 4 }}>
-                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[0]} size={revealedCardSize} />
-                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[1]} size={revealedCardSize} />
+                            <div className="tbl-opponent-cards" style={{ display: 'flex', gap: cardGapFor('revealed', 4) }}>
+                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[0]} size={revealedCardSize} overrideDims={cardDimsFor('revealed', revealedCardSize)} />
+                              <PlayingCard c={(sdP?.holeCards ?? shownCards!)[1]} size={revealedCardSize} overrideDims={cardDimsFor('revealed', revealedCardSize)} />
                             </div>
                           ) : null
                         ) : null
 
-                        // Seat pill text — eliminated takes priority over any transient action.
+                        // Seat pill text — eliminated/sitting-out take priority over any transient action.
                         let pillAction = ''
                         let pillColor = '#6b7280'
                         if (eliminated) { pillAction = 'Eliminated'; pillColor = '#ef4444' }
+                        else if (seat.sittingOut) { pillAction = 'Sitting Out'; pillColor = '#f59e0b' }
                         else if (isTurn && isMe) { pillAction = 'YOUR TURN'; pillColor = '#86efac' }
                         else if (lastAct)   { pillAction = formatAction(lastAct); pillColor = actionLabelColor(lastAct.action) }
                         else if (allIn)     { pillAction = 'All-In';  pillColor = '#fdba74' }
@@ -3179,14 +3259,17 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           </div>
         )}
 
-        {heroCards && (!heroIsLive || visibleHoleCount >= 1) && (
+        {heroCards && (!heroIsLive || visibleHoleCount >= 1) && (() => {
+          const heroDims = cardDimsFor('hero', 'md')
+          const heroR = (heroDims ?? CARD_DIMS.md).r
+          return (
           <div
             className="tbl-hero-cards"
             style={{
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              gap: 6,
+              gap: cardGapFor('hero', 6),
               flexShrink: 0,
             }}
           >
@@ -3194,7 +3277,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               <div
                 key="hc1"
                 style={{
-                  borderRadius: CARD_DIMS.md.r + 2,
+                  borderRadius: heroR + 2,
                   lineHeight: 0,
                   flexShrink: 0,
                   boxShadow: heroIsLive
@@ -3203,7 +3286,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                   animation: heroIsLive ? 'card-deal-in 0.25s ease-out' : undefined,
                 }}
               >
-                <PlayingCard c={heroCards[0]} size="md" />
+                <PlayingCard c={heroCards[0]} size="md" overrideDims={heroDims} />
               </div>
             )}
 
@@ -3211,7 +3294,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               <div
                 key="hc2"
                 style={{
-                  borderRadius: CARD_DIMS.md.r + 2,
+                  borderRadius: heroR + 2,
                   lineHeight: 0,
                   flexShrink: 0,
                   boxShadow: heroIsLive
@@ -3220,11 +3303,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                   animation: heroIsLive ? 'card-deal-in 0.25s ease-out' : undefined,
                 }}
               >
-                <PlayingCard c={heroCards[1]} size="md" />
+                <PlayingCard c={heroCards[1]} size="md" overrideDims={heroDims} />
               </div>
             )}
           </div>
-        )}
+          )
+        })()}
       </div>
 
       {/* Right: compact player info — dealer button and turn-timer badge sit on
@@ -3446,16 +3530,21 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           .tbl-reaction-btn{transition:transform 0.15s ease, filter 0.15s ease; -webkit-tap-highlight-color:transparent;}
           .tbl-reaction-btn:hover{transform:scale(1.18); filter:drop-shadow(0 0 6px rgba(255,255,255,0.4));}
           .tbl-reaction-btn:active{transform:scale(0.9);}
-          .ap-range{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;outline:none;cursor:pointer;}
-          .ap-range::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
-          .ap-range::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:#c9a84c;box-shadow:0 0 8px rgba(201,168,76,0.55);border:2px solid #fff;cursor:pointer;}
-          .ap-qb{font-size:10px;font-weight:600;padding:4px 9px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);border-radius:6px;color:rgba(245,236,215,0.5);cursor:pointer;transition:all 0.14s;white-space:nowrap;}
+          .ap-range{-webkit-appearance:none;appearance:none;height:6px;border-radius:3px;outline:none;cursor:pointer;}
+          .ap-range::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#c9a84c;box-shadow:0 0 10px rgba(201,168,76,0.6);border:2.5px solid #fff;cursor:pointer;transition:transform 0.12s ease;}
+          .ap-range::-webkit-slider-thumb:hover{transform:scale(1.12);}
+          .ap-range::-webkit-slider-thumb:active{transform:scale(1.2);}
+          .ap-range::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:#c9a84c;box-shadow:0 0 10px rgba(201,168,76,0.6);border:2.5px solid #fff;cursor:pointer;transition:transform 0.12s ease;}
+          .ap-range::-moz-range-thumb:hover{transform:scale(1.12);}
+          .ap-range::-moz-range-thumb:active{transform:scale(1.2);}
+          .ap-qb{font-size:13px;font-weight:700;padding:9px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);border-radius:8px;color:rgba(245,236,215,0.55);cursor:pointer;transition:all 0.14s;white-space:nowrap;}
           .ap-qb:hover{background:rgba(201,168,76,0.14);border-color:rgba(201,168,76,0.4);color:#e8c97a;}
-          .ap-btn{flex:1;padding:13px 8px 11px;border:none;border-radius:10px;font-family:'Inter',sans-serif;font-size:13px;font-weight:700;letter-spacing:0.7px;text-transform:uppercase;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:3px;transition:filter 0.14s,box-shadow 0.14s;position:relative;overflow:hidden;}
+          .ap-btn{flex:1;min-height:64px;padding:20px 16px 17px;border:none;border-radius:14px;font-family:'Inter',sans-serif;font-size:17px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;transition:filter 0.14s,box-shadow 0.14s,transform 0.1s;position:relative;overflow:hidden;}
           .ap-btn::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:rgba(255,255,255,0.1);}
           .ap-btn:hover{filter:brightness(1.15);}
+          .ap-btn:active{transform:scale(0.97);}
           .ap-btn:disabled{opacity:0.4;cursor:not-allowed;filter:none;}
-          .ap-sub{font-size:10px;font-weight:400;opacity:0.72;text-transform:none;letter-spacing:0.2px;}
+          .ap-sub{font-size:12.5px;font-weight:500;opacity:0.8;text-transform:none;letter-spacing:0.2px;}
           .ap-fold{background:linear-gradient(180deg,#4a1515,#2d0c0c);border:1px solid rgba(220,38,38,0.35);color:#fca5a5;}
           .ap-fold:hover{box-shadow:0 0 18px rgba(220,38,38,0.22);}
           .ap-check{background:linear-gradient(180deg,#18381a,#0d2410);border:1px solid rgba(34,197,94,0.28);color:#86efac;}
@@ -3640,31 +3729,35 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-main-col{padding:3px 6px!important;gap:2px!important;}
 
             /* ── Two-column action layout ─────────────────────────── */
-            .tbl-actions-layout{flex-direction:row!important;align-items:stretch!important;gap:6px!important;}
+            /* Gap trimmed slightly (was 6px) to make room for the bigger buttons below. */
+            .tbl-actions-layout{flex-direction:row!important;align-items:stretch!important;gap:5px!important;}
             .tbl-btns-col{order:1!important;flex:0 0 auto!important;gap:3px!important;justify-content:center!important;}
-            .tbl-raise-panel{order:2!important;flex:1!important;min-width:0!important;gap:3px!important;justify-content:center!important;border-left:1px solid rgba(255,255,255,0.07)!important;padding-left:7px!important;}
+            .tbl-raise-panel{order:2!important;flex:1!important;min-width:0!important;gap:3px!important;justify-content:center!important;border-left:1px solid rgba(255,255,255,0.07)!important;padding-left:6px!important;}
             .tbl-timer-text{display:none!important;}
 
             /* Raise row */
             .tbl-raise-row{padding:3px 5px!important;border-radius:6px!important;gap:4px!important;}
-            .tbl-raise-row input[type="number"]{width:46px!important;font-size:12px!important;}
+            .tbl-raise-row input[type="number"]{width:50px!important;font-size:13px!important;}
 
             /* Range thumb — bigger for touch */
-            .ap-range::-webkit-slider-thumb{width:20px!important;height:20px!important;}
-            .ap-range::-moz-range-thumb{width:20px!important;height:20px!important;}
+            .ap-range::-webkit-slider-thumb{width:24px!important;height:24px!important;}
+            .ap-range::-moz-range-thumb{width:24px!important;height:24px!important;}
 
-            /* Quick bet buttons */
+            /* Quick bet buttons — gap trimmed to fit the larger button size */
             .tbl-qb-row{flex-wrap:wrap!important;gap:3px!important;}
-            .ap-qb{padding:5px 9px!important;font-size:10px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
+            .tbl-qb-btns{gap:4px!important;}
+            .ap-qb{padding:8px 13px!important;font-size:12px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
 
             /* Pre-action */
             .tbl-preaction-label{display:none!important;}
             .tbl-preaction-row{gap:3px!important;}
             .tbl-preaction-row button{padding:5px 3px!important;font-size:9px!important;border-radius:6px!important;}
 
-            /* Action buttons */
-            .ap-btn{padding:6px 8px 5px!important;font-size:11px!important;border-radius:7px!important;letter-spacing:0.4px!important;}
-            .ap-sub{font-size:8.5px!important;}
+            /* Action buttons — gap trimmed slightly (was 8px, see tbl-btn-row inline
+               style) so the bigger buttons still fit four-across on a short viewport. */
+            .tbl-btn-row{gap:5px!important;}
+            .ap-btn{min-height:0!important;padding:10px 10px 8px!important;font-size:13.5px!important;border-radius:9px!important;letter-spacing:0.4px!important;gap:3px!important;}
+            .ap-sub{font-size:10.5px!important;}
           }
 
           /* ── Very narrow screens (e.g. iPhone SE landscape 568px) ── */
@@ -3678,8 +3771,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-seat-pill-name{font-size:15px!important;}
             .tbl-seat-pill-stack{font-size:19px!important;}
             .tbl-community-row{transform:scale(0.66);transform-origin:center;}
-            .ap-btn{padding:5px 6px 4px!important;font-size:10px!important;}
-            .ap-qb{padding:3px 6px!important;font-size:9px!important;}
+            .tbl-btn-row{gap:4px!important;}
+            .ap-btn{min-height:0!important;padding:8px 8px 6px!important;font-size:12px!important;gap:2px!important;}
+            .ap-sub{font-size:9.5px!important;}
+            .tbl-qb-btns{gap:3px!important;}
+            .ap-qb{padding:6px 10px!important;font-size:10.5px!important;}
 
             /* Seat pods need to shrink further than the default --mscale on a   */
             /* viewport this short — set per table size via data-seatcount so    */
@@ -3726,7 +3822,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                       <div className="tbl-raise-panel" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                         {/* Quick bets + timer text (timer text hidden on mobile) */}
                         <div className="tbl-qb-row" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                          <div className="tbl-qb-btns" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                             {([
                               { l: 'Min',    fn: () => setRaiseAmount(minRaiseTo) },
                               { l: '½ Pot',  fn: () => quickBet(0.5) },
@@ -3784,7 +3880,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         </div>
                       )}
                       {/* Action buttons */}
-                      <div className="tbl-btn-row" style={{ display: 'flex', gap: 8 }}>
+                      <div className="tbl-btn-row" style={{ display: 'flex', gap: 10 }}>
                         <button onClick={() => sendAction('FOLD')} className="ap-btn ap-fold">
                           Fold<span className="ap-sub">Muck</span>
                         </button>
@@ -3895,6 +3991,21 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         >Start Hand</button>
                       )}
 
+                      {mySittingOut && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                          <p style={{ color: '#f59e0b', fontSize: 12, fontWeight: 600, margin: 0 }}>
+                            You&apos;re sitting out — your turns auto-check or auto-fold.
+                          </p>
+                          <button
+                            onClick={handleRejoin}
+                            disabled={!connected}
+                            style={{ background: connected ? '#78350f' : '#2a2116', border: '1px solid #b45309', borderRadius: 8, padding: '7px 20px', color: connected ? '#fde68a' : '#8a6d3b', fontSize: 13, fontWeight: 700, cursor: connected ? 'pointer' : 'not-allowed', opacity: connected ? 1 : 0.5 }}
+                            onMouseEnter={e => { if (connected) e.currentTarget.style.background = '#92400e' }}
+                            onMouseLeave={e => { if (connected) e.currentTarget.style.background = '#78350f' }}
+                          >Rejoin</button>
+                        </div>
+                      )}
+
                       {!hand && !canStart && !showdownResult && myStatus === 'seated' && (
                         <p style={{ color: sitGoStartCountdown != null || sitGoRebuyWaitingForOthers ? '#6ee7b7' : '#475569', fontSize: sitGoStartCountdown != null || sitGoRebuyWaitingForOthers ? 14 : 12, fontWeight: sitGoStartCountdown != null || sitGoRebuyWaitingForOthers ? 700 : 400 }}>
                           {sitGoStartCountdown != null
@@ -3941,6 +4052,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           onSkip={() => setShowTipModal(false)}
         />
       )}
+
     </div>
   )
 }

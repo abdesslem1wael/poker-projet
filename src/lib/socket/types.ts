@@ -90,6 +90,9 @@ export interface ClientToServerEvents {
   // Targeted live reaction (e.g. Trash / Tissue) flown from sender seat to a target
   // player's seat. Purely visual — never persisted, never touches game state.
   send_reaction: (payload: { tableId: string; toPlayerId: string; reactionType: ReactionType }) => void
+  // Cash games only: clears a player's own sit-out/auto-action mode (set by a
+  // turn timeout — see turn_timer_start). Takes effect from their next turn/hand.
+  rejoin_cash_game: (payload: { tableId: string }) => void
 }
 
 // ── Public payload types ───────────────────────────────────────────────────
@@ -99,6 +102,7 @@ export type SeatInfo = {
   username: string | null
   avatarId: number | null
   eliminated: boolean  // Sit & Go only — always false for cash tables
+  sittingOut: boolean  // Cash only — true after a turn timeout, until the player clicks Rejoin; always false for Sit & Go
 }
 
 export type SpectatorInfo = {

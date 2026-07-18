@@ -46,6 +46,32 @@ export class GameManager {
     return this.games.get(tableId)?.handState != null
   }
 
+  // True for cash tables with an active hand — reuses rakeEnabled (set from
+  // game_mode !== 'sit_go' in doStartHand) rather than threading a second,
+  // redundant flag through startHand.
+  isCashGame(tableId: string): boolean {
+    return this.games.get(tableId)?.handState?.rakeEnabled ?? false
+  }
+
+  // Cash-only: true once this player has timed out on a turn and hasn't
+  // rejoined since. Always false for Sit & Go and when no hand is active.
+  isPlayerSittingOut(tableId: string, playerId: string): boolean {
+    const s = this.games.get(tableId)?.handState
+    if (!s || !s.rakeEnabled) return false
+    return s.players.find(p => p.playerId === playerId)?.sittingOut === true
+  }
+
+  // Mutates the in-memory hand's copy of this flag so a change (timeout or
+  // rejoin) takes effect starting the player's very next turn within the
+  // CURRENT hand, not just the next one. No-op if no hand is active or the
+  // player isn't in it — the DB write (the actual source of truth) still
+  // happens regardless, in server.ts.
+  setSittingOut(tableId: string, playerId: string, value: boolean): void {
+    const s = this.games.get(tableId)?.handState
+    const p = s?.players.find(p => p.playerId === playerId)
+    if (p) p.sittingOut = value
+  }
+
   getPublicHandState(tableId: string): PublicHandState | null {
     const s = this.games.get(tableId)?.handState
     if (!s) return null
@@ -105,6 +131,10 @@ export class GameManager {
     // already taken out of the buy-in at registration (see register_sit_go),
     // so skimming from pots on top of that would double-charge players.
     rakeEnabled: boolean = true,
+    // Cash-game sit-out mode (table_players.is_sitting_out) — carried into
+    // this hand's player state so isPlayerSittingOut() can skip the turn
+    // timer for them from the very first actor onward. Always empty for Sit & Go.
+    sittingOutPlayerIds: Set<string> = new Set(),
   ): Promise<{ ok: true } | { error: string }> {
     if (seatedPlayers.length < 2) {
       return { error: 'Need at least 2 seated players to start a hand' }
@@ -178,6 +208,7 @@ export class GameManager {
       status: 'active' as PlayerStatus,
       hasActedThisRound: false,
       holeCards: [firstCards[i], secondCards[i]],
+      sittingOut: sittingOutPlayerIds.has(p.playerId),
     }))
 
     // Post small blind.

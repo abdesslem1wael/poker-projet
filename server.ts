@@ -304,6 +304,76 @@ nextApp.prepare().then(async () => {
     turnTimerStartedAt.delete(tableId)
   }
 
+  // Marks a cash-game player as sitting out (table_players.is_sitting_out) —
+  // both in the DB (source of truth, survives disconnects/restarts) and on
+  // the in-memory hand, if one is still active, so it takes effect starting
+  // their very next turn. Never called for Sit & Go — callers gate on
+  // isCash captured BEFORE gm.processAction(), since a FOLD that ends the
+  // hand clears GameManager's in-memory state (and isCashGame with it).
+  async function markCashPlayerSittingOut(tableId: string, playerId: string): Promise<void> {
+    gm.setSittingOut(tableId, playerId, true)
+    const { error } = await supabase
+      .from('table_players')
+      .update({ is_sitting_out: true, sitting_out_since: new Date().toISOString() })
+      .eq('table_id', tableId)
+      .eq('player_id', playerId)
+      .eq('status', 'seated')
+    if (error) console.error(`[game] failed to mark sitting out  table=${tableId} player=${playerId}`, error)
+    else console.log(`[game] player now sitting out (auto-action mode)  table=${tableId} player=${playerId}`)
+  }
+
+  // Shared by a real turn-timer expiry and an already-sitting-out player's
+  // instant auto-action: try CHECK (free), fall back to FOLD, broadcast the
+  // result, and continue the hand. `markAsSittingOut` is true only for a
+  // genuine timeout — an already-sitting-out player re-marking themselves on
+  // every subsequent turn would be redundant (and would needlessly rewrite
+  // sitting_out_since).
+  async function performAutoAction(tableId: string, playerId: string, markAsSittingOut: boolean): Promise<void> {
+    try {
+      // Captured before gm.processAction() — a FOLD that ends the hand clears
+      // GameManager's in-memory hand state, and isCashGame() with it.
+      const isCash = gm.isCashGame(tableId)
+
+      let result = gm.processAction(tableId, playerId, 'CHECK')
+      let autoAction: BettingAction = 'CHECK'
+
+      if ('error' in result) {
+        result = gm.processAction(tableId, playerId, 'FOLD')
+        autoAction = 'FOLD'
+        if ('error' in result) return
+      }
+
+      console.log(`[game] auto-${autoAction}  table=${tableId} user=${playerId}`)
+
+      io.to(`table:${tableId}`).emit('action_result', {
+        tableId, playerId, action: autoAction, amount: 0,
+      })
+
+      if (markAsSittingOut && isCash) {
+        await markCashPlayerSittingOut(tableId, playerId)
+      }
+
+      if (result.handEnded) {
+        await handleHandEnd(tableId, result.data)
+      } else if ('runout' in result && result.runout) {
+        const state = await buildTableState(supabase, tableId)
+        if (state) io.to(`table:${tableId}`).emit('table_state', state)
+        handleAllInRunout(tableId)
+        return  // skip the extra table_state emit below
+      } else {
+        const next = gm.getPublicHandState(tableId)
+        if (next?.currentTurnPlayerId) {
+          await handleTurnStart(tableId, next.currentTurnPlayerId)
+        }
+      }
+
+      const state = await buildTableState(supabase, tableId)
+      if (state) io.to(`table:${tableId}`).emit('table_state', state)
+    } catch (err) {
+      console.error('[game] auto action crashed:', err)
+    }
+  }
+
   function startTurnTimer(tableId: string, playerId: string): void {
     clearTurnTimer(tableId)
 
@@ -317,44 +387,7 @@ nextApp.prepare().then(async () => {
     const t = setTimeout(() => {
       turnTimers.delete(tableId)
       turnTimerStartedAt.delete(tableId)
-
-      void (async () => {
-        try {
-          // Try CHECK first (costs nothing), fall back to FOLD.
-          let result = gm.processAction(tableId, playerId, 'CHECK')
-          let autoAction: BettingAction = 'CHECK'
-
-          if ('error' in result) {
-            result = gm.processAction(tableId, playerId, 'FOLD')
-            autoAction = 'FOLD'
-            if ('error' in result) return
-          }
-
-          console.log(`[game] timeout auto-${autoAction}  table=${tableId} user=${playerId}`)
-
-          io.to(`table:${tableId}`).emit('action_result', {
-            tableId, playerId, action: autoAction, amount: 0,
-          })
-
-          if (result.handEnded) {
-            await handleHandEnd(tableId, result.data)
-          } else if ('runout' in result && result.runout) {
-            const state = await buildTableState(supabase, tableId)
-            if (state) io.to(`table:${tableId}`).emit('table_state', state)
-            handleAllInRunout(tableId)
-          } else {
-            const next = gm.getPublicHandState(tableId)
-            if (next?.currentTurnPlayerId) {
-              await handleTurnStart(tableId, next.currentTurnPlayerId)
-            }
-          }
-
-          const state = await buildTableState(supabase, tableId)
-          if (state) io.to(`table:${tableId}`).emit('table_state', state)
-        } catch (err) {
-          console.error('[game] turn timer action crashed:', err)
-        }
-      })()
+      void performAutoAction(tableId, playerId, true)
     }, TURN_TIMEOUT_MS)
 
     turnTimers.set(tableId, t)
@@ -364,7 +397,16 @@ nextApp.prepare().then(async () => {
   // get the SAME countdown as connected ones — a seat being offline changes
   // nothing about turn timing, only that nobody will click before it expires.
   // The timeout callback in startTurnTimer() auto-CHECKs/FOLDs either way.
+  //
+  // A cash player already in sit-out/auto-action mode (see performAutoAction)
+  // skips the countdown entirely and is acted on immediately — no timer ever
+  // starts or is broadcast for them.
   async function handleTurnStart(tableId: string, playerId: string): Promise<void> {
+    if (gm.isPlayerSittingOut(tableId, playerId)) {
+      console.log(`[game] sitting-out player's turn — instant auto-action  table=${tableId} user=${playerId}`)
+      await performAutoAction(tableId, playerId, false)
+      return
+    }
     startTurnTimer(tableId, playerId)
   }
 
@@ -670,11 +712,15 @@ nextApp.prepare().then(async () => {
 
     const { data: playersData } = await supabase
       .from('table_players')
-      .select('player_id, seat_number')
+      .select('player_id, seat_number, is_sitting_out')
       .eq('table_id', tableId)
       .eq('status', 'seated')
 
-    const allSeatedRows = (playersData as Array<{ player_id: string; seat_number: number }> | null) ?? []
+    const allSeatedRows = (playersData as Array<{ player_id: string; seat_number: number; is_sitting_out: boolean }> | null) ?? []
+    // Cash-only in practice — is_sitting_out is only ever written for cash
+    // tables (see markCashPlayerSittingOut) — but read unconditionally here;
+    // it's simply always false for every Sit & Go row.
+    const sittingOutPlayerIds = new Set(allSeatedRows.filter(r => r.is_sitting_out).map(r => r.player_id))
 
     // Deal in everyone currently connected PLUS everyone known to be merely
     // offline right now (disconnectedSeats) — same rule for every table type.
@@ -776,7 +822,7 @@ nextApp.prepare().then(async () => {
     // Auto rake is a cash-games-only mechanic — a Sit & Go's house fee is
     // already taken out of the buy-in at registration (see register_sit_go),
     // so raking pots on top of that would double-charge players.
-    const result = await gm.startHand(tableId, allSeated, supabase, small_blind, big_blind, stackOverrides, game_mode !== 'sit_go')
+    const result = await gm.startHand(tableId, allSeated, supabase, small_blind, big_blind, stackOverrides, game_mode !== 'sit_go', sittingOutPlayerIds)
     if ('error' in result) return 'failed'
 
     // Start the 1-hour session on the very first hand — timer *cash* tables
@@ -1623,6 +1669,37 @@ nextApp.prepare().then(async () => {
         toPlayerId,
         reactionType,
       })
+    })
+
+    // ── rejoin_cash_game ────────────────────────────────────────────────────
+    // Clears a cash player's own sit-out/auto-action mode (set by a turn
+    // timeout — see markCashPlayerSittingOut). The DB write is the source of
+    // truth; the in-memory gm.setSittingOut call makes it take effect from
+    // this player's very next turn even within the currently running hand.
+    socket.on('rejoin_cash_game', async ({ tableId }) => {
+      if (!socket.data.seatedAtTables.has(tableId)) {
+        socket.emit('socket_error', { message: 'You must be seated to rejoin' })
+        return
+      }
+
+      const { error } = await supabase
+        .from('table_players')
+        .update({ is_sitting_out: false, sitting_out_since: null })
+        .eq('table_id', tableId)
+        .eq('player_id', userId)
+        .eq('status', 'seated')
+
+      if (error) {
+        console.error(`[game] rejoin failed  table=${tableId} user=${userId}`, error)
+        socket.emit('socket_error', { message: 'Failed to rejoin' })
+        return
+      }
+
+      gm.setSittingOut(tableId, userId, false)
+      console.log(`[game] player rejoined  table=${tableId} user=${username}`)
+
+      const state = await buildTableState(supabase, tableId)
+      if (state) io.to(`table:${tableId}`).emit('table_state', state)
     })
 
     // ── send_tip ───────────────────────────────────────────────────────────

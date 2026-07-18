@@ -32,6 +32,11 @@ export async function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl
 
+  // TEMPORARY: local-only screenshot preview route, no auth needed. Revert with the rest of the preview harness.
+  if (pathname.startsWith('/dev-preview-table')) {
+    return supabaseResponse
+  }
+
   if (!user && !pathname.startsWith('/login')) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'

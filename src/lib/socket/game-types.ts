@@ -15,6 +15,10 @@ export interface PlayerHandState {
   status: PlayerStatus
   hasActedThisRound: boolean
   holeCards: [Card, Card]     // NEVER sent to the client
+  // Cash games only (see HandState.rakeEnabled): true once this player has
+  // timed out on a turn — their future turns skip the countdown timer and
+  // auto-act instantly, until they explicitly rejoin. Always false for Sit & Go.
+  sittingOut: boolean
 }
 
 export interface HandState {

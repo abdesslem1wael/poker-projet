@@ -358,3 +358,72 @@ describe('processAction', () => {
     expect(new Set(keys).size).toBe(keys.length)
   })
 })
+
+describe('cash sit-out mode', () => {
+  let gm: GameManager
+  beforeEach(() => { gm = new GameManager() })
+
+  it('marks players from sittingOutPlayerIds as sitting out, others not', async () => {
+    await gm.startHand(TABLE, seated3, makeSupabase(), SB, BB, undefined, true, new Set([P2]))
+    expect(gm.isPlayerSittingOut(TABLE, P2)).toBe(true)
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(false)
+    expect(gm.isPlayerSittingOut(TABLE, P3)).toBe(false)
+  })
+
+  it('isPlayerSittingOut is false when no hand is active', () => {
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(false)
+  })
+
+  it('never reports sitting out for a Sit & Go hand (rakeEnabled false), even if requested', async () => {
+    await gm.startHand(TABLE, seated3, makeSupabase(), SB, BB, undefined, false, new Set([P1]))
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(false)
+  })
+
+  it('isCashGame reflects rakeEnabled for the active hand', async () => {
+    await gm.startHand(TABLE, seated2, makeSupabase(), SB, BB, undefined, true)
+    expect(gm.isCashGame(TABLE)).toBe(true)
+  })
+
+  it('isCashGame is false for a Sit & Go hand', async () => {
+    await gm.startHand(TABLE, seated2, makeSupabase(), SB, BB, undefined, false)
+    expect(gm.isCashGame(TABLE)).toBe(false)
+  })
+
+  it('isCashGame is false when no hand is active', () => {
+    expect(gm.isCashGame(TABLE)).toBe(false)
+  })
+
+  it('setSittingOut(true) marks a player mid-hand (timeout path)', async () => {
+    await startHand3(gm)
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(false)
+    gm.setSittingOut(TABLE, P1, true)
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(true)
+  })
+
+  it('setSittingOut(false) clears sitting-out mid-hand (rejoin path)', async () => {
+    await gm.startHand(TABLE, seated3, makeSupabase(), SB, BB, undefined, true, new Set([P1]))
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(true)
+    gm.setSittingOut(TABLE, P1, false)
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(false)
+  })
+
+  it('setSittingOut is a no-op when no hand is active', () => {
+    expect(() => gm.setSittingOut(TABLE, P1, true)).not.toThrow()
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(false)
+  })
+
+  it('a manual FOLD never sets sittingOut', async () => {
+    await startHand3(gm) // P1 (UTG) acts first
+    gm.processAction(TABLE, P1, 'FOLD')
+    expect(gm.isPlayerSittingOut(TABLE, P1)).toBe(false)
+  })
+
+  it('a sitting-out player is still dealt cards and posts blinds normally', async () => {
+    // seated3, first hand: dealer=seat1(P1), SB=seat2(P2), BB=seat3(P3).
+    await gm.startHand(TABLE, seated3, makeSupabase(), SB, BB, undefined, true, new Set([P2]))
+    expect(gm.getPlayerHoleCards(TABLE, P2)).toHaveLength(2)
+    const state = gm.getPublicHandState(TABLE)!
+    const p2 = state.players.find(p => p.playerId === P2)!
+    expect(p2.roundContribution).toBe(SB)
+  })
+})
