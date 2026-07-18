@@ -332,7 +332,7 @@ type CardSizeRole = 'hero' | 'opponent' | 'community' | 'revealed'
 // Hand-tuned mobile-landscape card sizes (replaces the CSS transform-scale
 // default for these 4 roles on mobile-landscape; desktop is untouched).
 const MOBILE_CARD_SIZES: Record<CardSizeRole, CardSizeSpec> = {
-  hero:      { w: 61, h: 81, gap: 6 },
+  hero:      { w: 48.8, h: 64.8, gap: 6 },
   opponent:  { w: 19, h: 32, gap: 2 },
   community: { w: 69, h: 83, gap: 10 },
   revealed:  { w: 42, h: 60, gap: 4 },
@@ -533,10 +533,10 @@ function MiniChip({ amount, size = 11 }: { amount: number; size?: number }) {
 }
 
 // Bet-chip piles ("raised chips on the table") render at 1.4x the original
-// scale — chipSize default 15→21 (2x, then dialed back 30%), layer offset
-// scaled to match. Callers that want the original in-hand/pot scale pass
-// chipSize explicitly.
-function ChipStack({ amount, showLabel = true, chipSize = 21 }: { amount: number; showLabel?: boolean; chipSize?: number }) {
+// scale — chipSize default 15→21 (2x, then dialed back 30%), then dialed back
+// another 20% to 16.8. Layer offset scaled to match. Callers that want the
+// original in-hand/pot scale pass chipSize explicitly.
+function ChipStack({ amount, showLabel = true, chipSize = 16.8 }: { amount: number; showLabel?: boolean; chipSize?: number }) {
   const palette = chipColor(amount)
   const layers = Math.min(5, Math.max(2, Math.floor(Math.log10(amount + 1))))
   const layerOffset = chipSize / 7.5
