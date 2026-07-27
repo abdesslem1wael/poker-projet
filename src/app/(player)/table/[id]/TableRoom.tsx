@@ -1234,6 +1234,18 @@ function formatSessionTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
+// Final tuned position for the mobile-landscape vertical raise rail (right
+// edge of the table, between the top and bottom safe zones). Found via the
+// now-removed dev-only position editor.
+const mobileRaiseRailPosition = {
+  right: 56,
+  top: 92,
+  bottom: 145,
+  width: 39,
+  height: 200,
+  scale: 1.1,
+}
+
 export default function TableRoom({ initialState, currentUserId, myStatus, mySeatNumber, isAdmin }: Props) {
   const router = useRouter()
 
@@ -1310,6 +1322,24 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     mql.addEventListener('change', handler)
     return () => mql.removeEventListener('change', handler)
   }, [])
+
+  // Fixed-position style for the mobile-landscape vertical raise rail —
+  // final tuned values from mobileRaiseRailPosition (see module scope above).
+  const railFixedStyle: React.CSSProperties = {
+    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+    position: 'fixed',
+    right: mobileRaiseRailPosition.right,
+    top: mobileRaiseRailPosition.top,
+    bottom: mobileRaiseRailPosition.bottom,
+    width: mobileRaiseRailPosition.width,
+    height: mobileRaiseRailPosition.height,
+    transform: `scale(${mobileRaiseRailPosition.scale})`,
+    background: 'rgba(10,12,18,0.82)', border: '1px solid rgba(201,168,76,0.32)',
+    borderRadius: 16, padding: '10px 8px',
+    backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+    boxShadow: '0 4px 18px rgba(0,0,0,0.45)',
+    zIndex: 25,
+  }
 
   const nextHandTimerRef   = useRef<ReturnType<typeof setInterval> | null>(null)
   const sitGoStartTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -3856,17 +3886,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             an inline horizontal row otherwise. */}
                         <div
                           className="tbl-raise-row"
-                          style={mobileLandscape ? {
-                            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-                            position: 'fixed',
-                            right: 'calc(env(safe-area-inset-right, 0px) + 8px)',
-                            top: '50%', transform: 'translateY(-50%)',
-                            background: 'rgba(10,12,18,0.82)', border: '1px solid rgba(201,168,76,0.32)',
-                            borderRadius: 16, padding: '10px 8px',
-                            backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
-                            boxShadow: '0 4px 18px rgba(0,0,0,0.45)',
-                            zIndex: 25,
-                          } : {
+                          style={mobileLandscape ? railFixedStyle : {
                             display: 'flex', alignItems: 'center', gap: 10,
                             background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)',
                             borderRadius: 10, padding: '9px 14px',
