@@ -552,9 +552,9 @@ function ChipStack({ amount, showLabel = true, chipSize = 16.8 }: { amount: numb
       {showLabel && (
         <span style={{
           marginTop: 4,
-          background: 'rgba(0,0,0,0.8)',
           color: '#fbbf24', fontSize: 16, fontWeight: 700,
-          padding: '2px 6px', borderRadius: 6, letterSpacing: '-0.3px', whiteSpace: 'nowrap',
+          padding: '2px 6px', letterSpacing: '-0.3px', whiteSpace: 'nowrap',
+          textShadow: '0 1px 2px rgba(0,0,0,0.9), 0 0 4px rgba(0,0,0,0.7)',
         }}>
           {formatChipAmount(amount)}
         </span>
@@ -3539,6 +3539,9 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           .ap-range::-moz-range-thumb:active{transform:scale(1.2);}
           .ap-qb{font-size:13px;font-weight:700;padding:9px 16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);border-radius:8px;color:rgba(245,236,215,0.55);cursor:pointer;transition:all 0.14s;white-space:nowrap;}
           .ap-qb:hover{background:rgba(201,168,76,0.14);border-color:rgba(201,168,76,0.4);color:#e8c97a;}
+          .ap-plus1k{flex-shrink:0;min-width:44px;min-height:36px;padding:6px 10px;font-size:12px;font-weight:700;background:rgba(201,168,76,0.12);border:1px solid rgba(201,168,76,0.35);border-radius:8px;color:#e8c97a;cursor:pointer;transition:all 0.14s;white-space:nowrap;-webkit-tap-highlight-color:transparent;}
+          .ap-plus1k:hover{background:rgba(201,168,76,0.22);border-color:rgba(201,168,76,0.55);}
+          .ap-plus1k:active{transform:scale(0.94);}
           .ap-btn{flex:1;min-height:64px;padding:20px 16px 17px;border:none;border-radius:14px;font-family:'Inter',sans-serif;font-size:17px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;transition:filter 0.14s,box-shadow 0.14s,transform 0.1s;position:relative;overflow:hidden;}
           .ap-btn::after{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:rgba(255,255,255,0.1);}
           .ap-btn:hover{filter:brightness(1.15);}
@@ -3728,25 +3731,36 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-panel-inner{min-height:0!important;align-items:stretch!important;}
             .tbl-main-col{padding:3px 6px!important;gap:2px!important;}
 
-            /* ── Two-column action layout ─────────────────────────── */
-            /* Gap trimmed slightly (was 6px) to make room for the bigger buttons below. */
-            .tbl-actions-layout{flex-direction:row!important;align-items:stretch!important;gap:5px!important;}
-            .tbl-btns-col{order:1!important;flex:0 0 auto!important;gap:3px!important;justify-content:center!important;}
-            .tbl-raise-panel{order:2!important;flex:1!important;min-width:0!important;gap:3px!important;justify-content:center!important;border-left:1px solid rgba(255,255,255,0.07)!important;padding-left:6px!important;}
+            /* ── Two-row action layout ────────────────────────────────
+               Row 1: Min/½Pot/Pot/Max + Raise-to amount + slider + +1K
+               Row 2: Fold / Call / Raise / All-in
+               (stacked via tbl-actions-layout's default column direction —
+               only the raise panel's own internal axis flips to a row) ── */
+            .tbl-actions-layout{gap:4px!important;}
+            .tbl-raise-panel{
+              flex-direction:row!important;
+              align-items:center!important;
+              gap:6px!important;
+            }
+            .tbl-btns-col{gap:0!important;}
             .tbl-timer-text{display:none!important;}
+            .tbl-qb-spacer{display:none!important;}
 
-            /* Raise row */
-            .tbl-raise-row{padding:3px 5px!important;border-radius:6px!important;gap:4px!important;}
-            .tbl-raise-row input[type="number"]{width:50px!important;font-size:13px!important;}
+            /* Quick bet buttons — fixed-width group, sits left of the raise row */
+            .tbl-qb-row{flex:0 0 auto!important;gap:0!important;}
+            .tbl-qb-btns{flex-wrap:nowrap!important;gap:3px!important;}
+            .ap-qb{padding:7px 8px!important;font-size:10.5px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
+
+            /* Raise row — grows to fill the rest of row 1 */
+            .tbl-raise-row{flex:1!important;min-width:0!important;padding:3px 6px!important;border-radius:6px!important;gap:5px!important;}
+            .tbl-raise-row input[type="number"]{width:44px!important;font-size:12px!important;}
 
             /* Range thumb — bigger for touch */
-            .ap-range::-webkit-slider-thumb{width:24px!important;height:24px!important;}
-            .ap-range::-moz-range-thumb{width:24px!important;height:24px!important;}
+            .ap-range::-webkit-slider-thumb{width:22px!important;height:22px!important;}
+            .ap-range::-moz-range-thumb{width:22px!important;height:22px!important;}
 
-            /* Quick bet buttons — gap trimmed to fit the larger button size */
-            .tbl-qb-row{flex-wrap:wrap!important;gap:3px!important;}
-            .tbl-qb-btns{gap:4px!important;}
-            .ap-qb{padding:8px 13px!important;font-size:12px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
+            /* +1K shortcut — compact so it fits at the end of row 1 */
+            .ap-plus1k{min-width:30px!important;min-height:30px!important;padding:4px 6px!important;font-size:10px!important;flex-shrink:0!important;}
 
             /* Pre-action */
             .tbl-preaction-label{display:none!important;}
@@ -3814,10 +3828,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                 return (
                   /* tbl-actions-layout:
                      desktop → flex-col (raise panel above, buttons below)
-                     mobile  → flex-row (buttons LEFT via order:1, raise RIGHT via order:2) */
+                     mobile landscape → flex-col, two rows: raise panel (row 1),
+                       then Fold/Call/Raise/All-in (row 2) — see the
+                       (max-height:500px) landscape query below */
                   <div className="tbl-actions-layout" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
 
-                    {/* ── RAISE PANEL — above btns on desktop, RIGHT col on mobile ── */}
+                    {/* ── RAISE PANEL — row 1 on both desktop and mobile landscape ── */}
                     {canRaise && (
                       <div className="tbl-raise-panel" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                         {/* Quick bets + timer text (timer text hidden on mobile) */}
@@ -3832,7 +3848,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                               <button key={q.l} onClick={q.fn} className="ap-qb">{q.l}</button>
                             ))}
                           </div>
-                          <div style={{ flex: 1 }} />
+                          <div className="tbl-qb-spacer" style={{ flex: 1 }} />
                           {turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
                             <span className="tbl-timer-text" style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11, minWidth: 26, textAlign: 'right' }}>{timeLeft}s</span>
                           )}
@@ -3856,11 +3872,19 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             onChange={e => setRaiseAmount(Number(e.target.value))}
                             style={{ flex: 1, background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)` }}
                           />
+                          <button
+                            type="button"
+                            className="ap-plus1k"
+                            onClick={() => setRaiseAmount(Math.min(raiseAmount + 1000, myMaxBet))}
+                            aria-label="Add 1000 to raise amount"
+                          >
+                            +1K
+                          </button>
                         </div>
                       </div>
                     )}
 
-                    {/* ── BUTTONS COL — below raise on desktop, LEFT col on mobile ── */}
+                    {/* ── BUTTONS COL — row 2 on both desktop and mobile landscape ── */}
                     <div className="tbl-btns-col" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                       {/* Timer when no raise */}
                       {!canRaise && turnTimerInfo?.playerId === currentUserId && timeLeft > 0 && (
