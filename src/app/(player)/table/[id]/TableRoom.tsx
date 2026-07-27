@@ -3731,14 +3731,14 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-panel-inner{min-height:0!important;align-items:stretch!important;}
             .tbl-main-col{padding:3px 6px!important;gap:2px!important;}
 
-            /* ── Two-row action layout ────────────────────────────────
-               Row 1: Min/½Pot/Pot/Max + Raise-to amount + slider + +1K
-               Row 2: Fold / Call / Raise / All-in
-               (stacked via tbl-actions-layout's default column direction —
-               only the raise panel's own internal axis flips to a row) ── */
+            /* ── Bottom bar: Row 1 quick-bets, Row 2 action buttons ───
+               The raise-to amount + slider + +1K live in a separate
+               floating vertical rail (.tbl-raise-row, positioned fixed —
+               see the inline mobileLandscape styles in the JSX), not in
+               this flow, so the bottom bar only carries the quick-bet
+               row and the Fold/Call/Raise/All-in row. ── */
             .tbl-actions-layout{gap:4px!important;}
             .tbl-raise-panel{
-              flex-direction:row!important;
               align-items:center!important;
               gap:6px!important;
             }
@@ -3746,20 +3746,18 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-timer-text{display:none!important;}
             .tbl-qb-spacer{display:none!important;}
 
-            /* Quick bet buttons — fixed-width group, sits left of the raise row */
-            .tbl-qb-row{flex:0 0 auto!important;gap:0!important;}
-            .tbl-qb-btns{flex-wrap:nowrap!important;gap:3px!important;}
-            .ap-qb{padding:7px 8px!important;font-size:10.5px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
+            /* Quick bet buttons — full width of row 1, now that the raise
+               amount/slider no longer shares this row */
+            .tbl-qb-row{gap:0!important;}
+            .tbl-qb-btns{flex-wrap:nowrap!important;gap:6px!important;flex:1!important;}
+            .ap-qb{flex:1!important;padding:8px 6px!important;font-size:12px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
 
-            /* Raise row — grows to fill the rest of row 1 */
-            .tbl-raise-row{flex:1!important;min-width:0!important;padding:3px 6px!important;border-radius:6px!important;gap:5px!important;}
-            .tbl-raise-row input[type="number"]{width:44px!important;font-size:12px!important;}
-
-            /* Range thumb — bigger for touch */
+            /* Range thumb — bigger for touch, works for both the horizontal
+               (desktop) and vertical (mobile-landscape rail) orientations */
             .ap-range::-webkit-slider-thumb{width:22px!important;height:22px!important;}
             .ap-range::-moz-range-thumb{width:22px!important;height:22px!important;}
 
-            /* +1K shortcut — compact so it fits at the end of row 1 */
+            /* +1K shortcut — compact so it fits at the bottom of the vertical rail */
             .ap-plus1k{min-width:30px!important;min-height:30px!important;padding:4px 6px!important;font-size:10px!important;flex-shrink:0!important;}
 
             /* Pre-action */
@@ -3853,15 +3851,42 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             <span className="tbl-timer-text" style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11, minWidth: 26, textAlign: 'right' }}>{timeLeft}s</span>
                           )}
                         </div>
-                        {/* Raise amount + slider */}
-                        <div className="tbl-raise-row" style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 10, padding: '9px 14px' }}>
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
-                            <span style={{ fontSize: 9, letterSpacing: '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>Raise to</span>
+                        {/* Raise amount + slider — a floating vertical rail on the
+                            right edge in mobile landscape (see mobileLandscape),
+                            an inline horizontal row otherwise. */}
+                        <div
+                          className="tbl-raise-row"
+                          style={mobileLandscape ? {
+                            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+                            position: 'fixed',
+                            right: 'calc(env(safe-area-inset-right, 0px) + 8px)',
+                            top: '50%', transform: 'translateY(-50%)',
+                            background: 'rgba(10,12,18,0.82)', border: '1px solid rgba(201,168,76,0.32)',
+                            borderRadius: 16, padding: '10px 8px',
+                            backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+                            boxShadow: '0 4px 18px rgba(0,0,0,0.45)',
+                            zIndex: 25,
+                          } : {
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)',
+                            borderRadius: 10, padding: '9px 14px',
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: mobileLandscape ? 'center' : 'flex-end', flexShrink: 0 }}>
+                            <span style={{ fontSize: 9, letterSpacing: mobileLandscape ? '1px' : '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>
+                              {mobileLandscape ? 'Raise' : 'Raise to'}
+                            </span>
                             <input
                               type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
                               step={state.bigBlind}
                               onChange={e => setRaiseAmount(Number(e.target.value))}
-                              style={{ width: 70, background: 'transparent', border: 'none', outline: 'none', fontFamily: '"JetBrains Mono",monospace', fontSize: 15, fontWeight: 600, color: '#e8c97a', textAlign: 'right', padding: 0 }}
+                              style={{
+                                width: mobileLandscape ? 48 : 70,
+                                background: 'transparent', border: 'none', outline: 'none',
+                                fontFamily: '"JetBrains Mono",monospace',
+                                fontSize: mobileLandscape ? 12 : 15, fontWeight: 600, color: '#e8c97a',
+                                textAlign: mobileLandscape ? 'center' : 'right', padding: 0,
+                              }}
                             />
                           </div>
                           <input
@@ -3870,7 +3895,14 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             step={state.bigBlind}
                             value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
                             onChange={e => setRaiseAmount(Number(e.target.value))}
-                            style={{ flex: 1, background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)` }}
+                            style={mobileLandscape ? {
+                              writingMode: 'vertical-lr', direction: 'rtl',
+                              width: 8, height: 110, flex: 'none',
+                              background: `linear-gradient(to top,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
+                            } : {
+                              flex: 1,
+                              background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
+                            }}
                           />
                           <button
                             type="button"
