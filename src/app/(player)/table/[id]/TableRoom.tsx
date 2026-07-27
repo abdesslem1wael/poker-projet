@@ -2854,15 +2854,17 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         ) : null
       )}
 
-      {/* ── Table chat — fixed floating panel, collapsible via header button.
-          Anchored on the LEFT: the right side is already claimed by the
-          "previous hand" panel (zIndex 600) and the dealer tip modal
-          (zIndex 900), both of which would otherwise sit on top of chat
-          and swallow its clicks. ──────────────────────────────────────── */}
+      {/* ── Table chat — a dropdown anchored below the 💬 button in the
+          header (top-right), not a tall left-side panel. Bounded maxHeight
+          (not a `bottom` offset) so it reads as a popover: it grows with the
+          message list up to that cap, then scrolls internally. zIndex sits
+          above the "previous hand" panel (600) since opening chat is an
+          explicit user action that should take priority; the dealer tip
+          modal (900) still stays on top of both. ──────────────────────── */}
       {chatOpen && (
         <div className="tbl-chat-panel" style={{
-          position: 'fixed', top: 52, left: 12, bottom: 100, zIndex: 550,
-          width: 260, display: 'flex', flexDirection: 'column',
+          position: 'fixed', top: 52, right: 12, zIndex: 650,
+          width: 260, maxHeight: 360, display: 'flex', flexDirection: 'column',
           background: 'linear-gradient(145deg, #0d1929, #080f1d)',
           border: '1px solid rgba(201,168,76,0.28)',
           borderRadius: 10,
@@ -3672,8 +3674,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-result-panel{top:34px!important;max-width:calc(100vw - 24px)!important;}
             .tbl-showdown-panel{max-width:calc(100vw - 24px)!important;}
 
-            /* Chat panel — smaller and tucked in the top-right so it stays clear of the table */
-            .tbl-chat-panel{width:190px!important;top:34px!important;bottom:64px!important;}
+            /* Chat panel — smaller dropdown tucked in the top-right so it stays clear of the table */
+            .tbl-chat-panel{width:190px!important;top:34px!important;max-height:min(56vh,260px)!important;}
             .tbl-chat-messages{font-size:10px!important;}
 
             /* Table wrap: let absolute child fill it cleanly */
@@ -3844,7 +3846,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           /* ── Very narrow screens (e.g. iPhone SE landscape 568px) ── */
           @media (max-height:380px) and (orientation:landscape){
             .tbl-header{height:26px!important;}
-            .tbl-chat-panel{width:160px!important;top:30px!important;bottom:54px!important;}
+            .tbl-chat-panel{width:160px!important;top:30px!important;max-height:min(50vh,200px)!important;}
             .tbl-seat-pill{padding:1px 4px!important;min-width:38px!important;}
             /* Pre-scale sizes — see the mscale comment in the (max-height:500px) block
                above. Worst-case tier here is --mscale:0.3 (7-9 max), which puts these
