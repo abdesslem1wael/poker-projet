@@ -1236,11 +1236,12 @@ function formatSessionTime(seconds: number): string {
 
 // Final tuned position for the mobile-landscape vertical raise rail (right
 // edge of the table, between the top and bottom safe zones). Found via the
-// now-removed dev-only position editor.
+// now-removed dev-only position editor. top/height (not bottom) define the
+// vertical extent — combining top+height+bottom over-constrains the box and
+// pushes it down, so bottom is deliberately not used.
 const mobileRaiseRailPosition = {
   right: 56,
   top: 92,
-  bottom: 145,
   width: 39,
   height: 200,
   scale: 1.1,
@@ -1330,7 +1331,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
     position: 'fixed',
     right: mobileRaiseRailPosition.right,
     top: mobileRaiseRailPosition.top,
-    bottom: mobileRaiseRailPosition.bottom,
     width: mobileRaiseRailPosition.width,
     height: mobileRaiseRailPosition.height,
     transform: `scale(${mobileRaiseRailPosition.scale})`,
@@ -1395,6 +1395,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const minRaiseTo = (hand?.currentBet ?? 0) + (hand?.minRaise ?? 0)
   const myStack    = myHP?.stack ?? 0
   const myMaxBet   = myStack + (myHP?.roundContribution ?? 0)
+  const sliderMax  = Math.max(minRaiseTo + 1, myMaxBet)
+  const sliderPct  = Math.round(((Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax) - minRaiseTo) / Math.max(1, sliderMax - minRaiseTo)) * 100)
   const seatedCnt  = state.seats.filter(s => s.playerId !== null).length
   const sessionActive  = sessionInfo != null && !sessionInfo.isExpired
   const sessionExpired = sessionInfo != null && sessionInfo.isExpired
@@ -2332,6 +2334,55 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       // Bottom safe area is handled by the action panel itself so its background
       // extends to the screen edge while its content stays above the home indicator
     }}>
+
+      {/* ── Mobile-landscape vertical raise rail ─────────────────────────────
+          Rendered at the page root (NOT inside .tbl-panel-outer) on purpose:
+          that panel has a backdrop-filter, and WebKit treats position:fixed
+          descendants of a backdrop-filter element as position:absolute
+          relative to it — which was dragging this rail down into the bottom
+          action bar, on top of the All-in button. Living outside that
+          subtree keeps it truly viewport-fixed, floating over the felt
+          between the top bar and the bottom action panel. */}
+      {mobileLandscape && needsMyAction && canRaise && (
+        <div className="tbl-raise-row" style={railFixedStyle}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+            <span style={{ fontSize: 9, letterSpacing: '1px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>
+              Raise
+            </span>
+            <input
+              type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
+              step={state.bigBlind}
+              onChange={e => setRaiseAmount(Number(e.target.value))}
+              style={{
+                width: 48, background: 'transparent', border: 'none', outline: 'none',
+                fontFamily: '"JetBrains Mono",monospace',
+                fontSize: 12, fontWeight: 600, color: '#e8c97a',
+                textAlign: 'center', padding: 0,
+              }}
+            />
+          </div>
+          <input
+            type="range" className="ap-range"
+            min={minRaiseTo} max={sliderMax}
+            step={state.bigBlind}
+            value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
+            onChange={e => setRaiseAmount(Number(e.target.value))}
+            style={{
+              writingMode: 'vertical-lr', direction: 'rtl',
+              width: 8, height: 110, flex: 'none',
+              background: `linear-gradient(to top,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
+            }}
+          />
+          <button
+            type="button"
+            className="ap-plus1k"
+            onClick={() => setRaiseAmount(Math.min(raiseAmount + 1000, myMaxBet))}
+            aria-label="Add 1000 to raise amount"
+          >
+            +1K
+          </button>
+        </div>
+      )}
 
       {/* ── Portrait lock ───────────────────────────────────────────────────── */}
       <div className="portrait-lock" aria-hidden="true">
@@ -3851,8 +3902,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               {/* ── MY TURN: action bar ──────────────────────────────── */}
               {needsMyAction && (() => {
                 const raiseDisabled = raiseAmount < minRaiseTo || raiseAmount > myMaxBet
-                const sliderMax = Math.max(minRaiseTo + 1, myMaxBet)
-                const sliderPct = Math.round(((Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax) - minRaiseTo) / Math.max(1, sliderMax - minRaiseTo)) * 100)
                 return (
                   /* tbl-actions-layout:
                      desktop → flex-col (raise panel above, buttons below)
@@ -3881,58 +3930,60 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             <span className="tbl-timer-text" style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11, minWidth: 26, textAlign: 'right' }}>{timeLeft}s</span>
                           )}
                         </div>
-                        {/* Raise amount + slider — a floating vertical rail on the
-                            right edge in mobile landscape (see mobileLandscape),
-                            an inline horizontal row otherwise. */}
-                        <div
-                          className="tbl-raise-row"
-                          style={mobileLandscape ? railFixedStyle : {
-                            display: 'flex', alignItems: 'center', gap: 10,
-                            background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)',
-                            borderRadius: 10, padding: '9px 14px',
-                          }}
-                        >
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: mobileLandscape ? 'center' : 'flex-end', flexShrink: 0 }}>
-                            <span style={{ fontSize: 9, letterSpacing: mobileLandscape ? '1px' : '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>
-                              {mobileLandscape ? 'Raise' : 'Raise to'}
-                            </span>
+                        {/* Raise amount + slider — desktop only here. In mobile
+                            landscape this is rendered at the root of the page
+                            instead (see the fixed-position rail below), since
+                            .tbl-panel-outer's backdrop-filter makes WebKit treat
+                            position:fixed descendants as if they were
+                            position:absolute relative to the panel, dragging
+                            the rail down to the bottom action bar. */}
+                        {!mobileLandscape && (
+                          <div
+                            className="tbl-raise-row"
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 10,
+                              background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)',
+                              borderRadius: 10, padding: '9px 14px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
+                              <span style={{ fontSize: 9, letterSpacing: '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>
+                                Raise to
+                              </span>
+                              <input
+                                type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
+                                step={state.bigBlind}
+                                onChange={e => setRaiseAmount(Number(e.target.value))}
+                                style={{
+                                  width: 70,
+                                  background: 'transparent', border: 'none', outline: 'none',
+                                  fontFamily: '"JetBrains Mono",monospace',
+                                  fontSize: 15, fontWeight: 600, color: '#e8c97a',
+                                  textAlign: 'right', padding: 0,
+                                }}
+                              />
+                            </div>
                             <input
-                              type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
+                              type="range" className="ap-range"
+                              min={minRaiseTo} max={sliderMax}
                               step={state.bigBlind}
+                              value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
                               onChange={e => setRaiseAmount(Number(e.target.value))}
                               style={{
-                                width: mobileLandscape ? 48 : 70,
-                                background: 'transparent', border: 'none', outline: 'none',
-                                fontFamily: '"JetBrains Mono",monospace',
-                                fontSize: mobileLandscape ? 12 : 15, fontWeight: 600, color: '#e8c97a',
-                                textAlign: mobileLandscape ? 'center' : 'right', padding: 0,
+                                flex: 1,
+                                background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
                               }}
                             />
+                            <button
+                              type="button"
+                              className="ap-plus1k"
+                              onClick={() => setRaiseAmount(Math.min(raiseAmount + 1000, myMaxBet))}
+                              aria-label="Add 1000 to raise amount"
+                            >
+                              +1K
+                            </button>
                           </div>
-                          <input
-                            type="range" className="ap-range"
-                            min={minRaiseTo} max={sliderMax}
-                            step={state.bigBlind}
-                            value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
-                            onChange={e => setRaiseAmount(Number(e.target.value))}
-                            style={mobileLandscape ? {
-                              writingMode: 'vertical-lr', direction: 'rtl',
-                              width: 8, height: 110, flex: 'none',
-                              background: `linear-gradient(to top,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
-                            } : {
-                              flex: 1,
-                              background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
-                            }}
-                          />
-                          <button
-                            type="button"
-                            className="ap-plus1k"
-                            onClick={() => setRaiseAmount(Math.min(raiseAmount + 1000, myMaxBet))}
-                            aria-label="Add 1000 to raise amount"
-                          >
-                            +1K
-                          </button>
-                        </div>
+                        )}
                       </div>
                     )}
 
