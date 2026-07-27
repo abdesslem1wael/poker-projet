@@ -3812,26 +3812,14 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-panel-inner{min-height:0!important;align-items:stretch!important;}
             .tbl-main-col{padding:3px 6px!important;gap:2px!important;}
 
-            /* ── Bottom bar: Row 1 quick-bets, Row 2 action buttons ───
-               The raise-to amount + slider + +1K live in a separate
-               floating vertical rail (.tbl-raise-row, positioned fixed —
-               see the inline mobileLandscape styles in the JSX), not in
-               this flow, so the bottom bar only carries the quick-bet
-               row and the Fold/Call/Raise/All-in row. ── */
+            /* ── Bottom bar: single row of Fold/Call/Raise/All-in ───
+               The quick-bet row (Min/½Pot/Pot/Max) is dropped entirely on
+               mobile landscape — the vertical rail's slider + +1K cover that
+               job — and the raise amount/slider render at the page root
+               instead (see the fixed-position rail in the JSX), not in this
+               flow, so the bottom bar only ever carries the action-button row. ── */
             .tbl-actions-layout{gap:4px!important;}
-            .tbl-raise-panel{
-              align-items:center!important;
-              gap:6px!important;
-            }
             .tbl-btns-col{gap:0!important;}
-            .tbl-timer-text{display:none!important;}
-            .tbl-qb-spacer{display:none!important;}
-
-            /* Quick bet buttons — full width of row 1, now that the raise
-               amount/slider no longer shares this row */
-            .tbl-qb-row{gap:0!important;}
-            .tbl-qb-btns{flex-wrap:nowrap!important;gap:6px!important;flex:1!important;}
-            .ap-qb{flex:1!important;padding:8px 6px!important;font-size:12px!important;font-weight:700!important;border-color:rgba(255,255,255,0.15)!important;color:rgba(245,236,215,0.72)!important;}
 
             /* Range thumb — bigger for touch, works for both the horizontal
                (desktop) and vertical (mobile-landscape rail) orientations */
@@ -3867,8 +3855,6 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             .tbl-btn-row{gap:4px!important;}
             .ap-btn{min-height:0!important;padding:8px 8px 6px!important;font-size:12px!important;gap:2px!important;}
             .ap-sub{font-size:9.5px!important;}
-            .tbl-qb-btns{gap:3px!important;}
-            .ap-qb{padding:6px 10px!important;font-size:10.5px!important;}
 
             /* Seat pods need to shrink further than the default --mscale on a   */
             /* viewport this short — set per table size via data-seatcount so    */
@@ -3910,10 +3896,18 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                        (max-height:500px) landscape query below */
                   <div className="tbl-actions-layout" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
 
-                    {/* ── RAISE PANEL — row 1 on both desktop and mobile landscape ── */}
-                    {canRaise && (
+                    {/* ── RAISE PANEL — desktop only. In mobile landscape the
+                        quick-bet buttons are dropped entirely (the vertical
+                        rail's slider + +1K cover that job) to keep the bottom
+                        bar compact, and the raise amount/slider render at the
+                        page root instead (see the fixed-position rail below):
+                        .tbl-panel-outer's backdrop-filter makes WebKit treat
+                        position:fixed descendants as if they were
+                        position:absolute relative to the panel, dragging a
+                        rail rendered in here down to the bottom action bar. ── */}
+                    {canRaise && !mobileLandscape && (
                       <div className="tbl-raise-panel" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                        {/* Quick bets + timer text (timer text hidden on mobile) */}
+                        {/* Quick bets + timer text */}
                         <div className="tbl-qb-row" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                           <div className="tbl-qb-btns" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                             {([
@@ -3930,60 +3924,51 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                             <span className="tbl-timer-text" style={{ color: timeLeft <= 15 ? '#f87171' : '#fde047', fontWeight: 700, fontFamily: 'monospace', fontSize: 11, minWidth: 26, textAlign: 'right' }}>{timeLeft}s</span>
                           )}
                         </div>
-                        {/* Raise amount + slider — desktop only here. In mobile
-                            landscape this is rendered at the root of the page
-                            instead (see the fixed-position rail below), since
-                            .tbl-panel-outer's backdrop-filter makes WebKit treat
-                            position:fixed descendants as if they were
-                            position:absolute relative to the panel, dragging
-                            the rail down to the bottom action bar. */}
-                        {!mobileLandscape && (
-                          <div
-                            className="tbl-raise-row"
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: 10,
-                              background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)',
-                              borderRadius: 10, padding: '9px 14px',
-                            }}
-                          >
-                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
-                              <span style={{ fontSize: 9, letterSpacing: '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>
-                                Raise to
-                              </span>
-                              <input
-                                type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
-                                step={state.bigBlind}
-                                onChange={e => setRaiseAmount(Number(e.target.value))}
-                                style={{
-                                  width: 70,
-                                  background: 'transparent', border: 'none', outline: 'none',
-                                  fontFamily: '"JetBrains Mono",monospace',
-                                  fontSize: 15, fontWeight: 600, color: '#e8c97a',
-                                  textAlign: 'right', padding: 0,
-                                }}
-                              />
-                            </div>
+                        <div
+                          className="tbl-raise-row"
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)',
+                            borderRadius: 10, padding: '9px 14px',
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', flexShrink: 0 }}>
+                            <span style={{ fontSize: 9, letterSpacing: '2px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>
+                              Raise to
+                            </span>
                             <input
-                              type="range" className="ap-range"
-                              min={minRaiseTo} max={sliderMax}
+                              type="number" value={raiseAmount} min={minRaiseTo} max={myMaxBet}
                               step={state.bigBlind}
-                              value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
                               onChange={e => setRaiseAmount(Number(e.target.value))}
                               style={{
-                                flex: 1,
-                                background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
+                                width: 70,
+                                background: 'transparent', border: 'none', outline: 'none',
+                                fontFamily: '"JetBrains Mono",monospace',
+                                fontSize: 15, fontWeight: 600, color: '#e8c97a',
+                                textAlign: 'right', padding: 0,
                               }}
                             />
-                            <button
-                              type="button"
-                              className="ap-plus1k"
-                              onClick={() => setRaiseAmount(Math.min(raiseAmount + 1000, myMaxBet))}
-                              aria-label="Add 1000 to raise amount"
-                            >
-                              +1K
-                            </button>
                           </div>
-                        )}
+                          <input
+                            type="range" className="ap-range"
+                            min={minRaiseTo} max={sliderMax}
+                            step={state.bigBlind}
+                            value={Math.min(Math.max(raiseAmount, minRaiseTo), sliderMax)}
+                            onChange={e => setRaiseAmount(Number(e.target.value))}
+                            style={{
+                              flex: 1,
+                              background: `linear-gradient(to right,#c9a84c ${sliderPct}%,rgba(255,255,255,0.1) ${sliderPct}%)`,
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="ap-plus1k"
+                            onClick={() => setRaiseAmount(Math.min(raiseAmount + 1000, myMaxBet))}
+                            aria-label="Add 1000 to raise amount"
+                          >
+                            +1K
+                          </button>
+                        </div>
                       </div>
                     )}
 
