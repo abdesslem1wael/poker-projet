@@ -1171,7 +1171,7 @@ function EliminationModal({
 // forces it off in production builds regardless of this flag.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const LAYOUT_PREVIEW_ENABLED    = true
+const LAYOUT_PREVIEW_ENABLED    = false
 const LAYOUT_PREVIEW_SEAT_COUNT = 9
 
 function buildLayoutPreview(seatCount: number, currentUserId: string): {
@@ -1270,6 +1270,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [showPrevHand, setShowPrevHand]  = useState(false)
   const [revealedCards, setRevealedCards] = useState<Record<string, [Card, Card]>>({})
   const [runoutRevealedCards, setRunoutRevealedCards] = useState<Record<string, [Card, Card]>>({})
+  // Admin/super_admin only — full hole-card view of the current hand (folded
+  // included), populated from the admin-only `admin_deal_cards` event. Always
+  // empty for non-admins since they never subscribe to that event.
+  const [adminHandCards, setAdminHandCards] = useState<Record<string, [Card, Card]>>({})
   const [winnerToastVisible, setWinnerToastVisible] = useState(false)
   const [sessionInfo, setSessionInfo]    = useState<SessionInfo | null>(null)
   const [sessionDisplay, setSessionDisplay] = useState<number>(0)
@@ -1894,6 +1898,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         setWinnerToastVisible(false)
         setRevealedCards({})
         setRunoutRevealedCards({})
+        setAdminHandCards({})
         setShowPrevHand(false)
         setTurnTimerInfo(null)
         setLastActions({})
@@ -1930,6 +1935,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         prevShowdownRef.current = p
         setShowdownResult(p)
         setRunoutRevealedCards({})
+        setAdminHandCards({})
         setTurnTimerInfo(null)
         setPreAction(null)
         setWinnerToastVisible(true)
@@ -1950,6 +1956,16 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       const onHandRevealed = (p: { tableId: string; playerId: string; cards: [Card, Card] }) => {
         if (!active || p.tableId !== initialState.tableId) return
         setRevealedCards(prev => ({ ...prev, [p.playerId]: p.cards }))
+      }
+
+      // Admin/super_admin only — the server never sends this event to anyone
+      // else, and never while this admin is seated as a player at this table.
+      const onAdminDealCards = (p: { tableId: string; hands: Array<{ playerId: string; cards: [Card, Card] }> }) => {
+        if (!active || p.tableId !== initialState.tableId) return
+        console.log(`[admin-card-view] received admin_deal_cards  tableId=${p.tableId} hands=${p.hands.length} playerIds=[${p.hands.map(h => h.playerId).join(',')}]`)
+        const map: Record<string, [Card, Card]> = {}
+        for (const h of p.hands) map[h.playerId] = h.cards
+        setAdminHandCards(map)
       }
 
       const onActionResult = (p: { tableId: string; playerId: string; action: BettingAction; amount: number }) => {
@@ -2127,6 +2143,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('sit_go_rebuy_update', onSitGoRebuyUpdate)
       socket.on('table_chat_message', onChatMessage)
       socket.on('reaction_sent', onReactionSent)
+      if (isAdmin) {
+        console.log(`[admin-card-view] client registered admin_deal_cards listener  tableId=${initialState.tableId}`)
+        socket.on('admin_deal_cards', onAdminDealCards)
+      }
 
       if (socket.connected) {
         socket.emit(myStatus === 'seated' ? 'join_table' : 'spectate_table', { tableId: initialState.tableId })
@@ -2147,6 +2167,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('sit_go_rebuy_update', onSitGoRebuyUpdate)
         socket.off('table_chat_message', onChatMessage)
         socket.off('reaction_sent', onReactionSent)
+        if (isAdmin) socket.off('admin_deal_cards', onAdminDealCards)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
         if (sitGoStartTimerRef.current) { clearInterval(sitGoStartTimerRef.current); sitGoStartTimerRef.current = null }
         if (sitGoRebuyTimerRef.current) { clearInterval(sitGoRebuyTimerRef.current); sitGoRebuyTimerRef.current = null }
@@ -2683,6 +2704,27 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               🏁 Last hands: {lastHandsRemaining}
             </span>
           )}
+          {/* Admin card view badge — only ever renders when this admin socket
+              actually received admin_deal_cards (never while seated as a player). */}
+          {isAdmin && Object.keys(adminHandCards).length > 0 && (
+            <span className="tbl-hide-mobile" title="You can see every player's hole cards for this hand" style={{
+              background: 'rgba(168,85,247,0.14)', border: '1px solid rgba(168,85,247,0.4)',
+              borderRadius: 5, padding: '2px 8px', color: '#d8b4fe',
+              fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', fontFamily: 'monospace',
+            }}>
+              🛡 Admin card view
+            </span>
+          )}
+          {/* TEMPORARY DEBUG — remove once admin card view is confirmed working end-to-end. */}
+          {isAdmin && (
+            <span style={{
+              background: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255,255,255,0.25)',
+              borderRadius: 5, padding: '2px 8px', color: '#fbbf24',
+              fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap', fontFamily: 'monospace',
+            }}>
+              DEBUG — Admin card view: eligible {String(myCurrentStatus !== 'seated')} | admin hands received: {Object.keys(adminHandCards).length}
+            </span>
+          )}
           <button
             onClick={toggleChat}
             title={chatOpen ? 'Hide chat' : 'Show chat'}
@@ -3174,11 +3216,27 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         // Cards shown beside player (non-hero) or above (hero)
                         const runoutCards = seat.playerId ? runoutRevealedCards[seat.playerId] : undefined
                         const shownCards  = seat.playerId ? revealedCards[seat.playerId] : undefined
+                        // Admin god-view — folded hands included, no showdown/reveal
+                        // required. The server never sends admin_deal_cards to a
+                        // non-admin or to an admin seated in this hand, but the
+                        // seated check is repeated here too as defense-in-depth.
+                        const adminCards = (isAdmin && myCurrentStatus !== 'seated' && seat.playerId)
+                          ? adminHandCards[seat.playerId]
+                          : undefined
 
                         const heroIsLive = isHero && hand !== null && !folded && isMe && effectiveHoleCards !== null
+                        // Admin viewing without a seat: the visual "hero" slot (bottom
+                        // anchor) is arbitrarily occupied by whichever real seat maps
+                        // there, since there's no real hero seat for a spectating admin.
+                        // Without this branch that seat's cards never rendered — heroCards
+                        // otherwise only resolves for the actual seated hero (isMe) or a
+                        // post-hand reveal, so admins saw every seat's cards EXCEPT this one.
+                        const showingAdminHeroCards = isHero && !heroIsLive && !!adminCards
                         const heroCards: [Card, Card] | null = isHero
                           ? (heroIsLive
                               ? effectiveHoleCards
+                              : showingAdminHeroCards
+                              ? adminCards!
                               : (!hand && sdP?.holeCards)
                               ? (sdP.holeCards as [Card, Card])
                               : (!hand && shownCards)
@@ -3194,7 +3252,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         const revealedCardSize: CardSize = max <= 6 ? 'md' : 'sm'
 
                         const sideCardNode = !isHero ? (
-                          hand && !folded && hp ? (
+                          hand && adminCards ? (
+                            <div className="tbl-opponent-cards" style={{ display: 'flex', gap: cardGapFor('revealed', 4), opacity: folded ? 0.55 : 1 }}>
+                              <PlayingCard c={adminCards[0]} size={revealedCardSize} overrideDims={cardDimsFor('revealed', revealedCardSize)} />
+                              <PlayingCard c={adminCards[1]} size={revealedCardSize} overrideDims={cardDimsFor('revealed', revealedCardSize)} />
+                            </div>
+                          ) : hand && !folded && hp ? (
                             isMe && effectiveHoleCards ? (
                               <div className="tbl-opponent-cards" style={{ display: 'flex', gap: cardGapFor('opponent', 2) }}>
                                 <PlayingCard c={effectiveHoleCards[0]} size={oppCardSize} overrideDims={cardDimsFor('opponent', oppCardSize)} />
@@ -3354,6 +3417,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
               justifyContent: 'center',
               gap: cardGapFor('hero', 6),
               flexShrink: 0,
+              opacity: showingAdminHeroCards && folded ? 0.55 : 1,
             }}
           >
             {(!heroIsLive || visibleHoleCount >= 1) && (

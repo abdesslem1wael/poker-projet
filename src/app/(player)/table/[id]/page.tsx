@@ -34,7 +34,8 @@ export default async function TablePage({
       .single(),
   ])
 
-  const isAdmin = (profileRes.data as { role?: string } | null)?.role === 'admin'
+  const role = (profileRes.data as { role?: string } | null)?.role
+  const isAdmin = role === 'admin' || role === 'super_admin'
   const exitRoute = isAdmin ? '/admin/dashboard' : '/lobby'
 
   if (!entryRes.data) redirect(exitRoute)

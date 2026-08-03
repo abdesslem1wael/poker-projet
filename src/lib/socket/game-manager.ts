@@ -110,6 +110,16 @@ export class GameManager {
       .map(p => ({ playerId: p.playerId, cards: [p.holeCards[0], p.holeCards[1]] as [Card, Card] }))
   }
 
+  // Admin-only: every seated player's hole cards, folded included (unlike
+  // getAllHoleCards above, which is for the all-in runout reveal and hides
+  // folded hands). Callers must restrict who this is sent to — this method
+  // itself does no authorization.
+  getAllHoleCardsForAdmin(tableId: string): Array<{ playerId: string; cards: [Card, Card] }> {
+    const s = this.games.get(tableId)?.handState
+    if (!s) return []
+    return s.players.map(p => ({ playerId: p.playerId, cards: [p.holeCards[0], p.holeCards[1]] as [Card, Card] }))
+  }
+
   // Returns null if the player has no hole cards (spectator, or no active hand).
   getPlayerHoleCards(tableId: string, playerId: string): [Card, Card] | null {
     const s = this.games.get(tableId)?.handState

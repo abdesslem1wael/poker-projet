@@ -4,7 +4,7 @@
 
 import { createServer } from 'node:http'
 import next from 'next'
-import { Server as SocketServer, type DefaultEventsMap } from 'socket.io'
+import { Server as SocketServer, type Socket, type DefaultEventsMap } from 'socket.io'
 import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 import {
   getTableState,
@@ -24,6 +24,7 @@ import { BreakManager, BREAK_COUNTDOWN_MS, BREAK_DURATION_MS } from './src/lib/s
 import { LastHandsManager } from './src/lib/socket/last-hands-manager'
 import { SitGoRebuyManager, SIT_GO_REBUY_DECISION_MS } from './src/lib/socket/sitgo-rebuy-manager'
 import { computeShowdown } from './src/lib/socket/showdown-helper'
+import { isEligibleForAdminCardView } from './src/lib/socket/admin-card-view'
 import type { HandEndedData } from './src/lib/socket/game-types'
 import type {
   BettingAction,
@@ -33,6 +34,8 @@ import type {
   TableStatePayload,
   ShowdownPayload,
 } from './src/lib/socket/types'
+
+type ServerSocket = Socket<ClientToServerEvents, ServerToClientEvents, DefaultEventsMap, SocketData>
 
 const port = parseInt(process.env.PORT ?? '3000', 10)
 const dev = process.env.NODE_ENV !== 'production'
@@ -288,6 +291,40 @@ nextApp.prepare().then(async () => {
 
   // Expose io to Next.js server actions (same Node.js process, different module graph).
   ;(global as Record<string, unknown>).__socketIo = io
+
+  // ── Admin card view ─────────────────────────────────────────────────────────
+  // Broadcasts every seated player's hole cards (folded included) to eligible
+  // admin_room sockets. "Eligible" excludes any admin socket that is itself
+  // seated as a player at this table (see isEligibleForAdminCardView) — a
+  // playing admin must not get a look at opponents' cards mid-hand.
+  async function emitAdminCardView(tableId: string): Promise<void> {
+    const hands = gm.getAllHoleCardsForAdmin(tableId)
+    if (hands.length === 0) return
+    const adminSockets = await io.in('admin_room').fetchSockets()
+    console.log(`[admin-card-view] admin_room has ${adminSockets.length} socket(s)  tableId=${tableId}`)
+    let sentTo = 0
+    for (const s of adminSockets) {
+      const eligible = isEligibleForAdminCardView({ role: s.data.role, seatedAtTables: s.data.seatedAtTables }, tableId)
+      console.log(`[admin-card-view] eligible ${eligible}  role=${s.data.role} tableId=${tableId} socketId=${s.id} seatedAtTables=[${[...s.data.seatedAtTables].join(',')}]`)
+      if (eligible) {
+        s.emit('admin_deal_cards', { tableId, hands })
+        sentTo++
+      }
+    }
+    console.log(`[admin-card-view] emitted admin_deal_cards  tableId=${tableId} hands=${hands.length} playerIds=[${hands.map(h => h.playerId).join(',')}] sentTo=${sentTo}`)
+  }
+
+  // Single-socket variant for reconnect (join_table / spectate_table) — resends
+  // the current admin card view so a refreshed or reconnecting admin tab doesn't
+  // lose the view mid-hand.
+  function resendAdminCardView(socket: ServerSocket, tableId: string): void {
+    const eligible = isEligibleForAdminCardView({ role: socket.data.role, seatedAtTables: socket.data.seatedAtTables }, tableId)
+    console.log(`[admin-card-view] eligible ${eligible}  role=${socket.data.role} tableId=${tableId} socketId=${socket.id} seatedAtTables=[${[...socket.data.seatedAtTables].join(',')}]`)
+    if (!eligible) return
+    const hands = gm.getAllHoleCardsForAdmin(tableId)
+    console.log(`[admin-card-view] resend admin_deal_cards  tableId=${tableId} hands=${hands.length} playerIds=[${hands.map(h => h.playerId).join(',')}] socketId=${socket.id}`)
+    if (hands.length > 0) socket.emit('admin_deal_cards', { tableId, hands })
+  }
 
   // ── Turn timer ─────────────────────────────────────────────────────────────
   const TURN_TIMEOUT_MS = 35_000  // 35 seconds per player turn
@@ -847,6 +884,10 @@ nextApp.prepare().then(async () => {
       if (cards) s.emit('deal_cards', { tableId, holeCards: cards })
     }
 
+    // Admin-only: full hole-card view (folded included), broadcast separately
+    // from the private per-player deal_cards above — see emitAdminCardView.
+    await emitAdminCardView(tableId)
+
     // Start the turn (or auto-act disconnected players) for the first actor.
     const firstState = gm.getPublicHandState(tableId)
     if (firstState?.currentTurnPlayerId) {
@@ -1346,6 +1387,7 @@ nextApp.prepare().then(async () => {
     // Admins get real-time session/break updates for all tables.
     if (socket.data.role === 'admin' || socket.data.role === 'super_admin') {
       socket.join('admin_room')
+      console.log(`[admin-card-view] joined admin_room  role=${socket.data.role} socket=${socket.id} user=${username}`)
       for (const session of sm.getAllSessions()) {
         socket.emit('session_update', {
           tableId: session.tableId,
@@ -1390,6 +1432,10 @@ nextApp.prepare().then(async () => {
       // Reconnect: resend private hole cards if a hand is in progress.
       const cards = gm.getPlayerHoleCards(tableId, userId)
       if (cards) socket.emit('deal_cards', { tableId, holeCards: cards })
+
+      // Reconnect: resend the admin card view (no-op if this admin is seated
+      // here — an admin sits down to play, not to spectate with X-ray vision).
+      resendAdminCardView(socket, tableId)
 
       // Reconnect: resend current turn timer state with accurate remaining seconds.
       const timerStart = turnTimerStartedAt.get(tableId)
@@ -1454,6 +1500,10 @@ nextApp.prepare().then(async () => {
       socket.join(`table:${tableId}`)
 
       socket.emit('spectator_joined', { tableId })
+
+      // Admin/super_admin watching without playing: send (or resend on
+      // reconnect) the full admin card view for the in-progress hand, if any.
+      resendAdminCardView(socket, tableId)
 
       const state = await buildTableState(supabase, tableId)
       if (state) io.to(`table:${tableId}`).emit('table_state', state)

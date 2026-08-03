@@ -221,6 +221,14 @@ export interface ServerToClientEvents {
     tableId: string
     holeCards: [Card, Card]   // sent only to the player whose cards these are
   }) => void
+  // Admin/super_admin only: every seated player's hole cards, folded included.
+  // Never broadcast to table:{tableId} — only to eligible admin_room sockets
+  // (see isEligibleForAdminCardView; an admin seated as a player at this table
+  // never receives it).
+  admin_deal_cards: (payload: {
+    tableId: string
+    hands: Array<{ playerId: string; cards: [Card, Card] }>
+  }) => void
   action_result: (payload: {
     tableId: string
     playerId: string
