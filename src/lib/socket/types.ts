@@ -307,6 +307,7 @@ export interface SocketData {
   userId: string
   username: string
   role: string
+  mustChangePassword: boolean
   joinedTables: Set<string>   // tables this socket has joined (seated OR spectating)
   seatedAtTables: Set<string> // tables where this socket holds a seat (not spectating)
 }

@@ -56,7 +56,7 @@ export async function changePasswordAction(
 
   await supabase
     .from('profiles')
-    .update({ must_change_password: false })
+    .update({ must_change_password: false, password_changed_at: new Date().toISOString() })
     .eq('id', user.id)
 
   revalidatePath('/lobby')

@@ -29,14 +29,19 @@ export default async function TablePage({
       .maybeSingle(),
     admin
       .from('profiles')
-      .select('role')
+      .select('role, must_change_password')
       .eq('id', user.id)
       .single(),
   ])
 
-  const role = (profileRes.data as { role?: string } | null)?.role
+  const profile = profileRes.data as { role?: string; must_change_password?: boolean } | null
+  const role = profile?.role
   const isAdmin = role === 'admin' || role === 'super_admin'
   const exitRoute = isAdmin ? '/admin/dashboard' : '/lobby'
+
+  // A player who still owes a password change can't reach the table by
+  // navigating here directly — the blocking modal lives on /lobby.
+  if (!isAdmin && profile?.must_change_password) redirect('/lobby')
 
   if (!entryRes.data) redirect(exitRoute)
 

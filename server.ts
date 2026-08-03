@@ -25,6 +25,7 @@ import { LastHandsManager } from './src/lib/socket/last-hands-manager'
 import { SitGoRebuyManager, SIT_GO_REBUY_DECISION_MS } from './src/lib/socket/sitgo-rebuy-manager'
 import { computeShowdown } from './src/lib/socket/showdown-helper'
 import { isEligibleForAdminCardView } from './src/lib/socket/admin-card-view'
+import { mustCompletePasswordChange } from './src/lib/socket/access-policy'
 import type { HandEndedData } from './src/lib/socket/game-types'
 import type {
   BettingAction,
@@ -1361,15 +1362,16 @@ nextApp.prepare().then(async () => {
 
     const { data: profileData } = await supabase
       .from('profiles')
-      .select('username, role')
+      .select('username, role, must_change_password')
       .eq('id', user.id)
       .single()
 
-    const profile = profileData as { username?: string; role?: string } | null
+    const profile = profileData as { username?: string; role?: string; must_change_password?: boolean } | null
 
     socket.data.userId = user.id
     socket.data.username = profile?.username ?? 'Unknown'
     socket.data.role = profile?.role ?? 'player'
+    socket.data.mustChangePassword = profile?.must_change_password ?? false
     socket.data.joinedTables = new Set()
     socket.data.seatedAtTables = new Set()
 
@@ -1406,6 +1408,11 @@ nextApp.prepare().then(async () => {
 
     // ── join_table ─────────────────────────────────────────────────────────
     socket.on('join_table', async ({ tableId }) => {
+      if (mustCompletePasswordChange(socket.data)) {
+        socket.emit('socket_error', { message: 'You must change your password before joining a table' })
+        return
+      }
+
       // When no session is active, evict ghost seats before reserving a new one.
       // This catches stale rows left behind by a server restart or crash.
       if (!sm.isActive(tableId)) {
@@ -1619,6 +1626,11 @@ nextApp.prepare().then(async () => {
     socket.on('player_action', async ({ tableId, action, amount }) => {
       if (!socket.data.seatedAtTables.has(tableId)) {
         socket.emit('socket_error', { message: 'You must be seated to act' })
+        return
+      }
+
+      if (mustCompletePasswordChange(socket.data)) {
+        socket.emit('socket_error', { message: 'You must change your password before you can act' })
         return
       }
 
