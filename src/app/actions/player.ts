@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { createClient } from '@/lib/supabase/server'
+import { getIo } from '@/lib/socket/io-access'
 
 type Ok  = { ok: true }
 type Err = { error: string }
@@ -58,6 +59,18 @@ export async function changePasswordAction(
     .from('profiles')
     .update({ must_change_password: false, password_changed_at: new Date().toISOString() })
     .eq('id', user.id)
+
+  // Clear the flag on this user's live socket(s) immediately — without this,
+  // an already-connected session would stay blocked from join_table/
+  // player_action until it happened to reconnect, since that check reads a
+  // value cached on the socket at connect time, not a fresh DB read.
+  const io = getIo()
+  if (io) {
+    const sockets = await io.fetchSockets()
+    for (const s of sockets) {
+      if (s.data.userId === user.id) s.data.mustChangePassword = false
+    }
+  }
 
   revalidatePath('/lobby')
   return { ok: true }

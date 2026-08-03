@@ -194,6 +194,43 @@ export async function deleteTransactionAction(
   revalidatePath(`/admin/players/${playerId}/history`)
 }
 
+// Re-syncs every currently-connected player socket against the DB's
+// must_change_password flag and pushes force_password_change to any that are
+// flagged. Needed because a socket only reads that flag once, at connect
+// time (see server.ts's auth middleware) — a session that connected BEFORE
+// the flag was set (e.g. the 028_must_change_password_backfill.sql rollout)
+// would otherwise stay unblocked until it happened to reconnect.
+export async function broadcastForcePasswordChangeAction(
+  _state: ActionState,
+  _formData: FormData
+): Promise<ActionState> {
+  const admin = await requireAdmin()
+  if (!admin) return { error: 'Unauthorized' }
+
+  const adminClient = createAdminClient()
+  const { data: flaggedRows, error } = await adminClient
+    .from('profiles')
+    .select('id')
+    .eq('role', 'player')
+    .eq('must_change_password', true)
+
+  if (error) return { error: error.message }
+
+  const flaggedIds = new Set((flaggedRows as { id: string }[] | null)?.map((r) => r.id) ?? [])
+
+  const io = getIo()
+  if (io && flaggedIds.size > 0) {
+    const sockets = await io.fetchSockets()
+    for (const s of sockets) {
+      if (!flaggedIds.has(s.data.userId)) continue
+      s.data.mustChangePassword = true
+      s.emit('force_password_change', {
+        message: 'An administrator requires you to change your password before continuing.',
+      })
+    }
+  }
+}
+
 export async function deletePlayerAction(
   _state: ActionState,
   formData: FormData

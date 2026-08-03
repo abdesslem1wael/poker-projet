@@ -4,7 +4,9 @@ import { useState, useTransition } from 'react'
 import { useRouter } from 'next/navigation'
 import { changePasswordAction } from '@/app/actions/player'
 
-export default function PasswordChangeModal() {
+type Props = { onSuccess?: () => void }
+
+export default function PasswordChangeModal({ onSuccess }: Props = {}) {
   const router                        = useRouter()
   const [newPw, setNewPw]             = useState('')
   const [confirmPw, setConfirmPw]     = useState('')
@@ -18,6 +20,7 @@ export default function PasswordChangeModal() {
       const res = await changePasswordAction(newPw, confirmPw)
       if ('error' in res) { setError(res.error); return }
       setDone(true)
+      onSuccess?.()
       router.refresh()
     })
   }

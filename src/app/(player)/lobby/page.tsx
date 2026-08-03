@@ -3,7 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { logoutAction } from '@/app/actions/auth'
 import LobbyTabs from './LobbyTabs'
-import PasswordChangeModal from './PasswordChangeModal'
+import ForcePasswordChangeGate from './ForcePasswordChangeGate'
 import ChipsDisplay from './ChipsDisplay'
 import SettingsModal from './SettingsModal'
 import SocketStatus from './SocketStatus'
@@ -162,7 +162,7 @@ export default async function LobbyPage() {
   return (
     // overflow-x-hidden guards against any child accidentally stretching the viewport
     <main className="min-h-screen overflow-x-hidden bg-zinc-950 text-zinc-100">
-      {profile?.must_change_password && <PasswordChangeModal />}
+      <ForcePasswordChangeGate initialRequired={!!profile?.must_change_password} />
 
       {/*
         Top bar — sticky so it stays visible while scrolling. padding-top pushes

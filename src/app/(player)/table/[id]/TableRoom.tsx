@@ -23,6 +23,7 @@ import { didNewHandStart } from '@/lib/socket/hand-transition'
 import { soundManager } from '@/lib/sounds'
 import type { SoundName } from '@/lib/sounds'
 import { rebuySitGoAction } from '@/app/actions/sitgo'
+import PasswordChangeModal from '../../lobby/PasswordChangeModal'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -1281,6 +1282,12 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [breakCountdownDisplay, setBreakCountdownDisplay] = useState<number>(0)
   const [breakDurationDisplay, setBreakDurationDisplay] = useState<number>(0)
   const [kickedMsg, setKickedMsg]        = useState<{ msg: string; reason: 'out_of_chips' | 'admin_kicked' | 'rebuy_timeout' } | null>(null)
+  // Pushed live by the server (force_password_change) if must_change_password
+  // gets set while this player is already on the table page — page.tsx's
+  // server-side redirect only catches a fresh navigation, not an already-open
+  // tab. Rendered as a blocking overlay, never a leave_table/navigation, so
+  // the seat is never released.
+  const [forcePasswordChange, setForcePasswordChange] = useState(false)
   const [sitGoStartCountdown, setSitGoStartCountdown] = useState<number | null>(null)
   const [rebuyPending, setRebuyPending]  = useState(false)
   const [rebuyError, setRebuyError]      = useState<string | null>(null)
@@ -2114,6 +2121,11 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         }])
       }
 
+      const onForcePasswordChange = () => {
+        if (!active) return
+        setForcePasswordChange(true)
+      }
+
       const onChatMessage = (p: ChatMessage) => {
         if (!active || p.tableId !== initialState.tableId) return
         setChatMessages(prev => {
@@ -2143,6 +2155,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       socket.on('sit_go_rebuy_update', onSitGoRebuyUpdate)
       socket.on('table_chat_message', onChatMessage)
       socket.on('reaction_sent', onReactionSent)
+      socket.on('force_password_change', onForcePasswordChange)
       if (isAdmin) {
         console.log(`[admin-card-view] client registered admin_deal_cards listener  tableId=${initialState.tableId}`)
         socket.on('admin_deal_cards', onAdminDealCards)
@@ -2167,6 +2180,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
         socket.off('sit_go_rebuy_update', onSitGoRebuyUpdate)
         socket.off('table_chat_message', onChatMessage)
         socket.off('reaction_sent', onReactionSent)
+        socket.off('force_password_change', onForcePasswordChange)
         if (isAdmin) socket.off('admin_deal_cards', onAdminDealCards)
         if (nextHandTimerRef.current) { clearInterval(nextHandTimerRef.current); nextHandTimerRef.current = null }
         if (sitGoStartTimerRef.current) { clearInterval(sitGoStartTimerRef.current); sitGoStartTimerRef.current = null }
@@ -2523,6 +2537,15 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
             </div>
             <div style={{ color: '#6b7280', fontSize: 12 }}>Redirecting to lobby…</div>
           </div>
+        </div>
+      )}
+
+      {/* ── Forced password change overlay ──────────────────────────────────── */}
+      {/* Purely an overlay on top of the still-mounted table — no navigation,
+          no leave_table, so the seat is untouched. */}
+      {forcePasswordChange && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 2000 }}>
+          <PasswordChangeModal onSuccess={() => setForcePasswordChange(false)} />
         </div>
       )}
 

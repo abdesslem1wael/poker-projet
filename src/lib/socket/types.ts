@@ -300,6 +300,11 @@ export interface ServerToClientEvents {
     toPlayerId: string
     reactionType: ReactionType
   }) => void
+  // Emitted to a player's socket(s) when they must change their password
+  // before continuing — on connect (if already flagged), when join_table or
+  // player_action is rejected for this reason, or via an admin broadcast
+  // that flags an already-connected session. Never sent to admin/super_admin.
+  force_password_change: (payload: { message: string }) => void
 }
 
 // ── Per-socket server-side data ────────────────────────────────────────────

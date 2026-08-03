@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import CreatePlayerForm from './CreatePlayerForm'
 import AdjustChipsForm from './AdjustChipsForm'
 import DeletePlayerButton from './DeletePlayerButton'
+import ForcePasswordChangeButton from './ForcePasswordChangeButton'
 import type { PlayerSummary } from './AdjustChipsForm'
 
 type WalletRow = { chips: number }
@@ -42,12 +43,15 @@ export default async function AdminPlayersPage() {
       <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-900/90 backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <h1 className="text-lg font-bold tracking-tight">Players</h1>
-          <Link
-            href="/admin/dashboard"
-            className="text-sm text-zinc-400 transition-colors hover:text-zinc-200"
-          >
-            ← Dashboard
-          </Link>
+          <div className="flex items-center gap-4">
+            <ForcePasswordChangeButton />
+            <Link
+              href="/admin/dashboard"
+              className="text-sm text-zinc-400 transition-colors hover:text-zinc-200"
+            >
+              ← Dashboard
+            </Link>
+          </div>
         </div>
       </header>
 

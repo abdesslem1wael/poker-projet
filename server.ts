@@ -1386,6 +1386,13 @@ nextApp.prepare().then(async () => {
 
     socket.emit('socket_ready', { userId, username })
 
+    // A player who still owes a forced password change is told immediately —
+    // covers reconnects (dropped connection, tab refocus) for someone who was
+    // already sitting on a table/lobby page when the flag was set.
+    if (mustCompletePasswordChange(socket.data)) {
+      socket.emit('force_password_change', { message: 'You must change your password before continuing.' })
+    }
+
     // Admins get real-time session/break updates for all tables.
     if (socket.data.role === 'admin' || socket.data.role === 'super_admin') {
       socket.join('admin_room')
@@ -1409,6 +1416,7 @@ nextApp.prepare().then(async () => {
     // ── join_table ─────────────────────────────────────────────────────────
     socket.on('join_table', async ({ tableId }) => {
       if (mustCompletePasswordChange(socket.data)) {
+        socket.emit('force_password_change', { message: 'You must change your password before joining a table' })
         socket.emit('socket_error', { message: 'You must change your password before joining a table' })
         return
       }
@@ -1630,6 +1638,7 @@ nextApp.prepare().then(async () => {
       }
 
       if (mustCompletePasswordChange(socket.data)) {
+        socket.emit('force_password_change', { message: 'You must change your password before you can act' })
         socket.emit('socket_error', { message: 'You must change your password before you can act' })
         return
       }
