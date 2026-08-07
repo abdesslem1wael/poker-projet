@@ -41,7 +41,7 @@ export type PublicHandState = {
 }
 
 // ── Live reactions (targeted, not persisted) ───────────────────────────────
-export type ReactionType = 'trash' | 'tissue'
+export type ReactionType = 'trash' | 'tissue' | 'wow' | 'karta' | 'bluff'
 
 // ── Client → Server ────────────────────────────────────────────────────────
 export interface ClientToServerEvents {

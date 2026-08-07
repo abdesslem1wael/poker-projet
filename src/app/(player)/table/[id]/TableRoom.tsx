@@ -626,6 +626,16 @@ function ChipFlight({ flight, onDone }: { flight: ChipFlightData; onDone: (id: s
 const REACTION_IMAGE_SRC: Record<ReactionType, string> = {
   trash: '/reactions/trash.png',
   tissue: '/reactions/tissue.png',
+  wow: '/reactions/wow.png',
+  karta: '/reactions/karta.png',
+  bluff: '/reactions/bluff!.png',
+}
+const REACTION_LABEL: Record<ReactionType, string> = {
+  trash: 'Trash',
+  tissue: 'Tissue',
+  wow: 'Wow',
+  karta: 'Karta',
+  bluff: 'Bluff',
 }
 const REACTION_FLIGHT_MS = 1800    // travel time from sender's seat to receiver's seat
 const REACTION_EXPLODE_MS = 900    // burst animation once it lands
@@ -643,8 +653,8 @@ const REACTION_PARTICLES = Array.from({ length: REACTION_PARTICLE_COUNT }, (_, i
 // Reaction picker footprint — kept as constants (rather than measured post-mount) so its
 // placement can be clamped synchronously in the same render as the click that opens it.
 // Must track the button/icon/gap/padding sizes below if those ever change.
-const REACTION_PICKER_W = 108
-const REACTION_PICKER_H = 56
+const REACTION_PICKER_W = 530
+const REACTION_PICKER_H = 116
 const REACTION_PICKER_GAP = 10     // gap between the seat pod and the picker
 const REACTION_PICKER_MARGIN = 8   // min clearance from the table container's edges
 
@@ -685,7 +695,7 @@ function ReactionFlight({ flight, onDone }: { flight: ReactionFlightData; onDone
         src={REACTION_IMAGE_SRC[flight.reactionType]}
         alt={flight.reactionType}
         style={{
-          width: 40, height: 40, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.6))',
+          width: 112, height: 112, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.6))',
           opacity: exploding ? 0 : 1,
           transform: exploding ? 'scale(1.7)' : 'scale(1)',
           transition: 'opacity 220ms ease-out, transform 220ms ease-out',
@@ -1038,56 +1048,49 @@ function WinnerToast({ showdown, onDismiss }: { showdown: ShowdownPayload; onDis
 // DealerTipModal
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DealerTipModal({ winAmount, onTip, onSkip }: {
-  winAmount: number
+const DEALER_TIP_AMOUNT = 500
+
+function DealerTipModal({ finalStack, onTip, onSkip }: {
+  finalStack: number
   onTip: (amount: number) => void
   onSkip: () => void
 }) {
-  const [custom, setCustom] = useState('')
-  const pcts = [2, 4, 6, 8]
+  const canAfford = finalStack >= DEALER_TIP_AMOUNT
 
   return (
     <div style={{
       position: 'fixed', bottom: 130, right: 14, zIndex: 900,
       background: 'linear-gradient(145deg, #0e1c30, #0a1520)',
       border: '1px solid rgba(201,168,76,0.35)',
-      borderRadius: 12, padding: '12px 14px', width: 220,
+      borderRadius: 12, padding: '10px 12px', width: 140,
       boxShadow: '0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(201,168,76,0.08)',
       pointerEvents: 'auto',
+      display: 'flex', flexDirection: 'column', gap: 6,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-        <div>
-          <div style={{ color: '#fbbf24', fontSize: 13, fontWeight: 700 }}>Tip the dealer?</div>
-          <div style={{ color: '#475569', fontSize: 10, marginTop: 1 }}>Won {formatNumber(winAmount)}</div>
-        </div>
-        <button onClick={onSkip} style={{ background: 'transparent', border: 'none', color: '#475569', fontSize: 16, cursor: 'pointer', padding: '0 2px', lineHeight: 1 }}>✕</button>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+        <div style={{ color: '#fbbf24', fontSize: 12, fontWeight: 700 }}>Tip the dealer</div>
+        <button onClick={onSkip} style={{ background: 'transparent', border: 'none', color: '#475569', fontSize: 14, cursor: 'pointer', padding: '0 0 0 6px', lineHeight: 1 }}>✕</button>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 }}>
-        {pcts.map(pct => {
-          const amt = Math.floor(winAmount * pct / 100)
-          return (
-            <button key={pct} onClick={() => onTip(amt)}
-              style={{ background: 'rgba(201,168,76,0.07)', border: '1px solid rgba(201,168,76,0.18)', borderRadius: 8, padding: '7px 4px', cursor: 'pointer', color: 'white', textAlign: 'center' }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(201,168,76,0.18)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'rgba(201,168,76,0.07)')}
-            >
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#fbbf24' }}>{pct}%</div>
-              <div style={{ fontSize: 9, color: '#64748b', marginTop: 1 }}>{formatNumber(amt)}</div>
-            </button>
-          )
-        })}
-      </div>
-      <div style={{ display: 'flex', gap: 5 }}>
-        <input type="number" placeholder="Custom" value={custom} onChange={e => setCustom(e.target.value)}
-          style={{ flex: 1, background: '#0a1520', border: '1px solid #1e3a58', borderRadius: 6, padding: '6px 8px', color: 'white', fontSize: 11, outline: 'none', minWidth: 0 }}
-          onFocus={e => (e.currentTarget.style.borderColor = '#c9a84c')}
-          onBlur={e => (e.currentTarget.style.borderColor = '#1e3a58')}
-        />
-        <button onClick={() => { const n = parseInt(custom, 10); if (n > 0) onTip(n) }}
-          disabled={!custom || parseInt(custom, 10) <= 0}
-          style={{ background: '#1d4ed8', border: 'none', borderRadius: 6, padding: '6px 10px', color: 'white', fontWeight: 700, cursor: 'pointer', fontSize: 11, opacity: !custom || parseInt(custom, 10) <= 0 ? 0.4 : 1, whiteSpace: 'nowrap' }}
-        >Tip</button>
-      </div>
+      <button
+        onClick={() => { if (canAfford) onTip(DEALER_TIP_AMOUNT) }}
+        disabled={!canAfford}
+        title={canAfford ? undefined : 'Not enough chips'}
+        style={{
+          background: canAfford ? 'rgba(201,168,76,0.12)' : 'rgba(100,116,139,0.08)',
+          border: `1px solid ${canAfford ? 'rgba(201,168,76,0.35)' : 'rgba(100,116,139,0.2)'}`,
+          borderRadius: 8, padding: '8px 4px',
+          cursor: canAfford ? 'pointer' : 'not-allowed',
+          color: canAfford ? '#fbbf24' : '#64748b',
+          fontSize: 16, fontWeight: 700, textAlign: 'center',
+        }}
+        onMouseEnter={e => { if (canAfford) e.currentTarget.style.background = 'rgba(201,168,76,0.22)' }}
+        onMouseLeave={e => { if (canAfford) e.currentTarget.style.background = 'rgba(201,168,76,0.12)' }}
+      >
+        {formatNumber(DEALER_TIP_AMOUNT)}
+      </button>
+      {!canAfford && (
+        <div style={{ color: '#f87171', fontSize: 9, textAlign: 'center' }}>Not enough chips</div>
+      )}
     </div>
   )
 }
@@ -3654,7 +3657,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                       pointerEvents: 'auto',
                     }}
                   >
-                    {(['trash', 'tissue'] as ReactionType[]).map(rt => (
+                    {(['trash', 'tissue', 'wow', 'karta', 'bluff'] as ReactionType[]).map(rt => (
                       <button
                         key={rt}
                         type="button"
@@ -3663,7 +3666,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                           e.stopPropagation()
                           sendReaction(reactionPicker.playerId, rt)
                         }}
-                        title={rt === 'trash' ? 'Trash' : 'Tissue'}
+                        title={REACTION_LABEL[rt]}
                         style={{
                           background: 'transparent',
                           border: 'none',
@@ -3685,8 +3688,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                           alt={rt}
                           draggable={false}
                           style={{
-                            width: 32,
-                            height: 32,
+                            width: 88,
+                            height: 88,
                             pointerEvents: 'none',
                             filter: 'drop-shadow(0 2px 5px rgba(0,0,0,0.6))',
                           }}
@@ -4285,7 +4288,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
       {/* Dealer tip modal */}
       {showTipModal && !tipSent && myShowdownResult && myShowdownResult.netChipChange > 0 && (
         <DealerTipModal
-          winAmount={myShowdownResult.netChipChange}
+          finalStack={myShowdownResult.finalStack}
           onTip={handleTip}
           onSkip={() => setShowTipModal(false)}
         />

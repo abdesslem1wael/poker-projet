@@ -1727,7 +1727,7 @@ nextApp.prepare().then(async () => {
         console.debug('[reaction] rejected — sender has not joined this table', { tableId, userId })
         return
       }
-      if (reactionType !== 'trash' && reactionType !== 'tissue') {
+      if (!['trash', 'tissue', 'wow', 'karta', 'bluff'].includes(reactionType)) {
         console.debug('[reaction] rejected — invalid reactionType', { reactionType })
         return
       }
@@ -1779,6 +1779,18 @@ nextApp.prepare().then(async () => {
     // ── send_tip ───────────────────────────────────────────────────────────
     socket.on('send_tip', async ({ tableId, handNumber, amount }) => {
       if (amount <= 0) return
+
+      const { data: walletRow } = await supabase
+        .from('wallets')
+        .select('chips')
+        .eq('user_id', userId)
+        .single()
+      const chips = (walletRow as { chips: number } | null)?.chips ?? 0
+      if (chips < amount) {
+        socket.emit('socket_error', { message: 'Not enough chips to send that tip' })
+        return
+      }
+
       const { error } = await supabase.from('dealer_tips').insert({
         table_id: tableId,
         hand_number: handNumber,
