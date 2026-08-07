@@ -653,8 +653,8 @@ const REACTION_PARTICLES = Array.from({ length: REACTION_PARTICLE_COUNT }, (_, i
 // Reaction picker footprint — kept as constants (rather than measured post-mount) so its
 // placement can be clamped synchronously in the same render as the click that opens it.
 // Must track the button/icon/gap/padding sizes below if those ever change.
-const REACTION_PICKER_W = 530
-const REACTION_PICKER_H = 116
+const REACTION_PICKER_W = 438
+const REACTION_PICKER_H = 96
 const REACTION_PICKER_GAP = 10     // gap between the seat pod and the picker
 const REACTION_PICKER_MARGIN = 8   // min clearance from the table container's edges
 
@@ -695,7 +695,7 @@ function ReactionFlight({ flight, onDone }: { flight: ReactionFlightData; onDone
         src={REACTION_IMAGE_SRC[flight.reactionType]}
         alt={flight.reactionType}
         style={{
-          width: 112, height: 112, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.6))',
+          width: 90, height: 90, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.6))',
           opacity: exploding ? 0 : 1,
           transform: exploding ? 'scale(1.7)' : 'scale(1)',
           transition: 'opacity 220ms ease-out, transform 220ms ease-out',
@@ -3688,8 +3688,8 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                           alt={rt}
                           draggable={false}
                           style={{
-                            width: 88,
-                            height: 88,
+                            width: 70,
+                            height: 70,
                             pointerEvents: 'none',
                             filter: 'drop-shadow(0 2px 5px rgba(0,0,0,0.6))',
                           }}
