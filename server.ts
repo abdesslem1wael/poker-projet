@@ -470,9 +470,12 @@ nextApp.prepare().then(async () => {
           }
 
           if (result.handEnded) {
-            // Emit final state before showdown.
-            const state = await buildTableState(supabase, tableId)
-            if (state) io.to(`table:${tableId}`).emit('table_state', state)
+            // No intermediate table_state here — GameManager already cleared
+            // handState by this point, so an emit now would broadcast a null
+            // hand and blank the board on clients until handleHandEnd's own
+            // table_state + showdown_result land after its DB writes. Let the
+            // client keep showing the last-dealt board until then, same as
+            // every other hand-end path (direct action, auto-action).
             await handleHandEnd(tableId, result.data)
           } else {
             console.log(`[game] runout street dealt  table=${tableId} phase=${result.phase}`)

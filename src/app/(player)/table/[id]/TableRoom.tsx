@@ -627,7 +627,18 @@ const REACTION_IMAGE_SRC: Record<ReactionType, string> = {
   trash: '/reactions/trash.png',
   tissue: '/reactions/tissue.png',
 }
-const REACTION_FLIGHT_MS = 700
+const REACTION_FLIGHT_MS = 1800    // travel time from sender's seat to receiver's seat
+const REACTION_EXPLODE_MS = 900    // burst animation once it lands
+const REACTION_TOTAL_MS = REACTION_FLIGHT_MS + REACTION_EXPLODE_MS + 300  // ~3s on screen end-to-end
+
+// Burst particles fan out evenly around the landing point — angle/distance/rotation
+// are the same for every flight so this only needs computing once at module scope.
+const REACTION_PARTICLE_COUNT = 8
+const REACTION_PARTICLES = Array.from({ length: REACTION_PARTICLE_COUNT }, (_, i) => {
+  const angle = (i / REACTION_PARTICLE_COUNT) * Math.PI * 2
+  const dist = 34 + (i % 3) * 12
+  return { tx: Math.cos(angle) * dist, ty: Math.sin(angle) * dist, rot: (i * 47) % 360 }
+})
 
 // Reaction picker footprint — kept as constants (rather than measured post-mount) so its
 // placement can be clamped synchronously in the same render as the click that opens it.
@@ -645,28 +656,27 @@ type ReactionFlightData = {
 }
 
 function ReactionFlight({ flight, onDone }: { flight: ReactionFlightData; onDone: (id: string) => void }) {
-  const [stage, setStage] = useState<'start' | 'flying' | 'landed'>('start')
+  const [stage, setStage] = useState<'start' | 'flying' | 'exploding'>('start')
 
   useEffect(() => {
     const raf = requestAnimationFrame(() => setStage('flying'))
-    const landTimer = setTimeout(() => setStage('landed'), REACTION_FLIGHT_MS)
-    const doneTimer = setTimeout(() => onDone(flight.id), REACTION_FLIGHT_MS + 250)
-    return () => { cancelAnimationFrame(raf); clearTimeout(landTimer); clearTimeout(doneTimer) }
+    const explodeTimer = setTimeout(() => setStage('exploding'), REACTION_FLIGHT_MS)
+    const doneTimer = setTimeout(() => onDone(flight.id), REACTION_TOTAL_MS)
+    return () => { cancelAnimationFrame(raf); clearTimeout(explodeTimer); clearTimeout(doneTimer) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const pos = stage === 'start' ? flight.from : flight.to
-  const landed = stage === 'landed'
+  const exploding = stage === 'exploding'
 
   return (
     <div style={{
       position: 'absolute',
       left: pos.left, top: pos.top,
-      transform: `translate(-50%,-50%) scale(${landed ? 1.3 : 1})`,
-      opacity: landed ? 0 : 1,
+      transform: 'translate(-50%,-50%)',
       transition: stage === 'start'
         ? 'none'
-        : `left ${REACTION_FLIGHT_MS}ms cubic-bezier(.22,.61,.36,1), top ${REACTION_FLIGHT_MS}ms cubic-bezier(.22,.61,.36,1), transform 250ms ease-out, opacity 250ms ease-out`,
+        : `left ${REACTION_FLIGHT_MS}ms cubic-bezier(.22,.61,.36,1), top ${REACTION_FLIGHT_MS}ms cubic-bezier(.22,.61,.36,1)`,
       zIndex: 50,
       pointerEvents: 'none',
     }}>
@@ -674,8 +684,31 @@ function ReactionFlight({ flight, onDone }: { flight: ReactionFlightData; onDone
       <img
         src={REACTION_IMAGE_SRC[flight.reactionType]}
         alt={flight.reactionType}
-        style={{ width: 40, height: 40, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.6))' }}
+        style={{
+          width: 40, height: 40, filter: 'drop-shadow(0 3px 8px rgba(0,0,0,0.6))',
+          opacity: exploding ? 0 : 1,
+          transform: exploding ? 'scale(1.7)' : 'scale(1)',
+          transition: 'opacity 220ms ease-out, transform 220ms ease-out',
+          display: 'block',
+        }}
       />
+      {exploding && (
+        <>
+          <span className="tbl-reaction-ring" style={{ animationDuration: `${REACTION_EXPLODE_MS}ms` }} />
+          {REACTION_PARTICLES.map((p, i) => (
+            <span
+              key={i}
+              className="tbl-reaction-particle"
+              style={{
+                animationDuration: `${REACTION_EXPLODE_MS}ms`,
+                ['--tx' as string]: `${p.tx}px`,
+                ['--ty' as string]: `${p.ty}px`,
+                ['--rot' as string]: `${p.rot}deg`,
+              } as React.CSSProperties}
+            />
+          ))}
+        </>
+      )}
     </div>
   )
 }
@@ -3697,6 +3730,10 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           @keyframes card-deal-in{from{opacity:0;transform:translateY(-16px) scale(0.84) rotate(-5deg)}to{opacity:1;transform:translateY(0) scale(1) rotate(0deg)}}
           @keyframes pot-pulse{0%{transform:translateY(16px) scale(1)}45%{transform:translateY(16px) scale(1.14)}100%{transform:translateY(16px) scale(1)}}
           @keyframes winner-toast-in{from{opacity:0;transform:translateX(-50%) translateY(-10px) scale(0.9)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+          @keyframes reaction-ring-burst{0%{width:10px;height:10px;margin:-5px 0 0 -5px;opacity:0.9;border-width:3px}100%{width:74px;height:74px;margin:-37px 0 0 -37px;opacity:0;border-width:1px}}
+          @keyframes reaction-particle-burst{0%{transform:translate(-50%,-50%) scale(1);opacity:1}100%{transform:translate(calc(-50% + var(--tx)),calc(-50% + var(--ty))) scale(0.2) rotate(var(--rot));opacity:0}}
+          .tbl-reaction-ring{position:absolute;top:50%;left:50%;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;border:2px solid rgba(255,235,180,0.9);box-shadow:0 0 10px rgba(232,201,122,0.5);animation-name:reaction-ring-burst;animation-timing-function:ease-out;animation-fill-mode:forwards;pointer-events:none;}
+          .tbl-reaction-particle{position:absolute;top:50%;left:50%;width:6px;height:6px;border-radius:50%;background:radial-gradient(circle,#ffe9a8 0%,#e8c97a 60%,transparent 100%);animation-name:reaction-particle-burst;animation-timing-function:cubic-bezier(.15,.7,.4,1);animation-fill-mode:forwards;pointer-events:none;}
           .tbl-reaction-btn{transition:transform 0.15s ease, filter 0.15s ease; -webkit-tap-highlight-color:transparent;}
           .tbl-reaction-btn:hover{transform:scale(1.18); filter:drop-shadow(0 0 6px rgba(255,255,255,0.4));}
           .tbl-reaction-btn:active{transform:scale(0.9);}
