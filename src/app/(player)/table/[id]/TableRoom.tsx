@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import type {
   TableStatePayload,
@@ -20,6 +20,11 @@ import type {
 import { getSocket } from '@/lib/socket/client'
 import type { AppSocket } from '@/lib/socket/client'
 import { didNewHandStart } from '@/lib/socket/hand-transition'
+import {
+  allInConfirmReducer,
+  canSubmitAllIn,
+  initialAllInConfirmState,
+} from '@/lib/socket/all-in-confirm'
 import { soundManager } from '@/lib/sounds'
 import type { SoundName } from '@/lib/sounds'
 import { rebuySitGoAction } from '@/app/actions/sitgo'
@@ -1303,6 +1308,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   const [tipSent, setTipSent]            = useState(false)
   const [preAction, setPreAction]        = useState<PreAction | null>(null)
   const [socketError, setSocketError]    = useState<string | null>(null)
+  const [allInConfirm, dispatchAllInConfirm] = useReducer(allInConfirmReducer, initialAllInConfirmState)
   const [prevHandResult, setPrevHandResult] = useState<ShowdownPayload | null>(null)
   const [showPrevHand, setShowPrevHand]  = useState(false)
   const [revealedCards, setRevealedCards] = useState<Record<string, [Card, Card]>>({})
@@ -2393,6 +2399,33 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
   // used to shrink the panel so it doesn't waste vertical space while waiting.
   const preActionOnly = myStatus === 'seated' && !!hand && !isMyTurn && myHP?.playerPhase === 'active'
 
+  // Auto-close the All-in confirmation the instant I'm no longer in a position to
+  // act on it — turn moved on, hand ended, I folded via another path, etc.
+  useEffect(() => {
+    if (!needsMyAction) dispatchAllInConfirm({ type: 'ACTION_UNAVAILABLE' })
+  }, [needsMyAction])
+
+  // A server-rejected action (e.g. a race where the turn moved on right before
+  // Confirm was clicked) re-enables the Confirm button instead of leaving it
+  // stuck disabled forever.
+  useEffect(() => {
+    if (socketError) dispatchAllInConfirm({ type: 'ERROR' })
+  }, [socketError])
+
+  function requestAllIn() {
+    dispatchAllInConfirm({ type: 'REQUEST' })
+  }
+
+  function cancelAllIn() {
+    dispatchAllInConfirm({ type: 'CANCEL' })
+  }
+
+  function confirmAllIn() {
+    if (!canSubmitAllIn(allInConfirm)) return
+    dispatchAllInConfirm({ type: 'CONFIRM' })
+    sendAction('ALL_IN')
+  }
+
   return (
     <div className={`flex flex-col overflow-hidden${theaterMode ? ' tbl-theater' : ''}`} style={{
       background: '#060b15',
@@ -2414,7 +2447,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           action bar, on top of the All-in button. Living outside that
           subtree keeps it truly viewport-fixed, floating over the felt
           between the top bar and the bottom action panel. */}
-      {mobileLandscape && needsMyAction && canRaise && (
+      {mobileLandscape && needsMyAction && canRaise && !allInConfirm.open && (
         <div className="tbl-raise-row" style={railFixedStyle}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
             <span style={{ fontSize: 9, letterSpacing: '1px', textTransform: 'uppercase', color: 'rgba(245,236,215,0.4)', whiteSpace: 'nowrap' }}>
@@ -3768,6 +3801,25 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
           .ap-raise:hover{box-shadow:0 0 22px rgba(201,168,76,0.28);}
           .ap-allin{background:linear-gradient(180deg,#2e0f50,#1c0935);border:1px solid rgba(168,85,247,0.4);color:#c4b5fd;}
           .ap-allin:hover{box-shadow:0 0 18px rgba(168,85,247,0.24);}
+          /* All-in requires confirmation — a small badge marks it distinctly
+             from the one-tap Fold/Call/Raise buttons. */
+          .ap-allin-needs-confirm{box-shadow:inset 0 0 0 1px rgba(168,85,247,0.55);}
+          .ap-allin-confirm-badge{position:absolute;top:5px;right:7px;font-size:8px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;color:#c4b5fd;background:rgba(168,85,247,0.22);border:1px solid rgba(168,85,247,0.45);border-radius:5px;padding:1px 4px;line-height:1.4;}
+          .ap-allin-cancel{background:linear-gradient(180deg,#1c2434,#11161f);border:1px solid rgba(148,163,184,0.32);color:#cbd5e1;flex:none!important;min-height:0!important;padding:10px 14px!important;}
+          .ap-allin-cancel:hover{box-shadow:0 0 14px rgba(148,163,184,0.16);}
+          /* Compact confirm/cancel bar that swaps in for the normal action
+             row — stays inside the existing panel footprint, doesn't cover
+             the table, and shrinks cleanly on narrow screens. */
+          .tbl-allin-confirm-row{display:flex;align-items:center;gap:8px;background:rgba(168,85,247,0.08);border:1px solid rgba(168,85,247,0.38);border-radius:12px;padding:8px 10px;}
+          .tbl-allin-confirm-copy{display:flex;flex-direction:column;flex:1;min-width:0;}
+          .tbl-allin-confirm-title{color:#e9d5ff;font-size:13px;font-weight:700;}
+          .tbl-allin-confirm-amount{color:rgba(233,213,255,0.72);font-size:11px;font-family:'JetBrains Mono',monospace;}
+          .tbl-allin-confirm-row .ap-btn{flex:none;min-height:0;padding:10px 16px 9px;font-size:13px;}
+          @media (max-width:480px){
+            .tbl-allin-confirm-row{flex-wrap:wrap;padding:8px;}
+            .tbl-allin-confirm-copy{flex-basis:100%;}
+            .tbl-allin-confirm-row .ap-btn{flex:1;padding:9px 8px 8px;font-size:12px;}
+          }
 
           /* ── Hero seat cards — shown in seat pod by default ──────── */
           .tbl-hero-cards{}
@@ -4034,7 +4086,7 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                         position:fixed descendants as if they were
                         position:absolute relative to the panel, dragging a
                         rail rendered in here down to the bottom action bar. ── */}
-                    {canRaise && !mobileLandscape && (
+                    {canRaise && !mobileLandscape && !allInConfirm.open && (
                       <div className="tbl-raise-panel" style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                         {/* Quick bets + timer text */}
                         <div className="tbl-qb-row" style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -4120,41 +4172,69 @@ export default function TableRoom({ initialState, currentUserId, myStatus, mySea
                           }} />
                         </div>
                       )}
-                      {/* Action buttons */}
-                      <div className="tbl-btn-row" style={{ display: 'flex', gap: 10 }}>
-                        <button onClick={() => sendAction('FOLD')} className="ap-btn ap-fold">
-                          Fold<span className="ap-sub">Muck</span>
-                        </button>
+                      {/* Action buttons — replaced by a compact confirm/cancel bar
+                          while the All-in confirmation is open. The timer above
+                          keeps running either way. */}
+                      {allInConfirm.open ? (
+                        <div className="tbl-allin-confirm-row" role="alertdialog" aria-label="Confirm All-in">
+                          <div className="tbl-allin-confirm-copy">
+                            <span className="tbl-allin-confirm-title">Confirm All-in?</span>
+                            <span className="tbl-allin-confirm-amount">{formatNumber(myStack)} chips</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={cancelAllIn}
+                            className="ap-btn ap-allin-cancel"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={confirmAllIn}
+                            disabled={allInConfirm.sending}
+                            className="ap-btn ap-allin"
+                          >
+                            {allInConfirm.sending ? 'Sending…' : 'Confirm All-In'}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="tbl-btn-row" style={{ display: 'flex', gap: 10 }}>
+                          <button onClick={() => sendAction('FOLD')} className="ap-btn ap-fold">
+                            Fold<span className="ap-sub">Muck</span>
+                          </button>
 
-                        {canCheck ? (
-                          <button onClick={() => sendAction('CHECK')} className="ap-btn ap-check">
-                            Check<span className="ap-sub">No bet</span>
-                          </button>
-                        ) : mustGoAllIn ? (
-                          <button onClick={() => sendAction('ALL_IN')} className="ap-btn ap-allin" style={{ flex: 1.35 }}>
-                            All-In<span className="ap-sub">{formatNumber(myStack)}</span>
-                          </button>
-                        ) : (
-                          <button onClick={() => sendAction('CALL')} className="ap-btn ap-call">
-                            Call<span className="ap-sub">{formatNumber(callAmt)}</span>
-                          </button>
-                        )}
-
-                        {canRaise && (
-                          <>
-                            <button
-                              onClick={() => sendAction('RAISE', raiseAmount)}
-                              disabled={raiseDisabled}
-                              className="ap-btn ap-raise"
-                            >
-                              Raise<span className="ap-sub">to {formatNumber(raiseAmount)}</span>
+                          {canCheck ? (
+                            <button onClick={() => sendAction('CHECK')} className="ap-btn ap-check">
+                              Check<span className="ap-sub">No bet</span>
                             </button>
-                            <button onClick={() => sendAction('ALL_IN')} className="ap-btn ap-allin">
+                          ) : mustGoAllIn ? (
+                            <button onClick={requestAllIn} className="ap-btn ap-allin ap-allin-needs-confirm" style={{ flex: 1.35 }}>
                               All-In<span className="ap-sub">{formatNumber(myStack)}</span>
+                              <span className="ap-allin-confirm-badge" aria-hidden="true">confirm</span>
                             </button>
-                          </>
-                        )}
-                      </div>
+                          ) : (
+                            <button onClick={() => sendAction('CALL')} className="ap-btn ap-call">
+                              Call<span className="ap-sub">{formatNumber(callAmt)}</span>
+                            </button>
+                          )}
+
+                          {canRaise && (
+                            <>
+                              <button
+                                onClick={() => sendAction('RAISE', raiseAmount)}
+                                disabled={raiseDisabled}
+                                className="ap-btn ap-raise"
+                              >
+                                Raise<span className="ap-sub">to {formatNumber(raiseAmount)}</span>
+                              </button>
+                              <button onClick={requestAllIn} className="ap-btn ap-allin ap-allin-needs-confirm">
+                                All-In<span className="ap-sub">{formatNumber(myStack)}</span>
+                                <span className="ap-allin-confirm-badge" aria-hidden="true">confirm</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                   </div>
